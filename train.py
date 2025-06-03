@@ -183,7 +183,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         Ll1_items = Ll1.detach()
         Ll1 = Ll1.mean()
         if opt.lambda_dssim > 0. and type(sampled_frame_no) != type(None) or (method == "by_error" and (iteration % 10 == 0) and opt.num_multiview_ssim==0):
-            ssim_value, ssim_map = ssim(image_tensor, gt_image_tensor)
+            ssim_value, _ = ssim(image_tensor, gt_image_tensor)
             Lssim = (1 - ssim_value) / 2
             loss = Ll1 + opt.lambda_dssim * Lssim
         else:
@@ -370,16 +370,14 @@ def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
         },
         {
             'name': 'train',
-            # Added min clauses just in case if the scene has less cameras than expected.
-            # 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(150, len(scene.getTrainCameras()) - 1), 5)], 
-            # 'cam_idx': min(10, len(scene.getTrainCameras()) - 1)
-            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 150, 5)], 
-            'cam_idx': 10
+            # Reduced cameras from 150 to 20 cameras to save memory
+            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(20, len(scene.getTrainCameras())), 5)], 
+            'cam_idx': min(3, len(scene.getTrainCameras()) - 1) if len(scene.getTrainCameras()) > 0 else 0
         }
     ]
     
     # Log number of Gaussians
-    wandb.log({"Number of Gaussians": len(gaussians._xyz)}, step=iteration)
+    wandb.log({"Number of Gaussians": len(gaussians._xyz.detach().cpu())}, step=iteration)
     
     for config in validation_configs:
         if config['cameras'] and len(config['cameras']) > 0:
@@ -416,6 +414,10 @@ def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
                 if idx == config['cam_idx']:
                     log_gen_images.append(image)
                     log_real_images.append(gt_image)
+                
+                # Clear intermediate tensors every few iterations to prevent memory buildup
+                if idx % 5 == 0:
+                    torch.cuda.empty_cache()
             
             # Average metrics
             num_cameras = len(config['cameras'])
@@ -426,27 +428,34 @@ def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
             
             # Log metrics
             wandb.log({
-                f"{config['name']}/L1": l1_test.item(),
-                f"{config['name']}/PSNR": psnr_test.item(),
-                f"{config['name']}/SSIM": ssim_test.item(),
-                f"{config['name']}/LPIPS": lpips_test.item()
+                f"{config['name']}/L1": l1_test.detach().cpu().item(),
+                f"{config['name']}/PSNR": psnr_test.detach().cpu().item(),
+                f"{config['name']}/SSIM": ssim_test.detach().cpu().item(),
+                f"{config['name']}/LPIPS": lpips_test.detach().cpu().item()
             }, step=iteration)
             
             # Print results
             print(f"\n[ITER {iteration}], #{len(gaussians._xyz)} gaussians, Evaluating {config['name']}: "
                   f"L1={l1_test.item():.6f}, PSNR={psnr_test.item():.6f}, "
                   f"SSIM={ssim_test.item():.6f}, LPIPS={lpips_test.item():.6f}")
+        
+        # Added: clear memory between test and train evaluation
+        torch.cuda.empty_cache()
     
     # Log sample images
-    # Convert images to numpy for wandb logging
-    real_img = log_real_images[0].detach().cpu().permute(1, 2, 0).numpy()
-    gen_img = log_gen_images[0].detach().cpu().permute(1, 2, 0).numpy()
+    if log_gen_images and log_real_images:
+        # Convert images to numpy for wandb logging
+        real_img = log_real_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        gen_img = log_gen_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        
+        wandb.log({
+            "Real Image": wandb.Image(real_img, caption="Real"),
+            "Generated Image": wandb.Image(gen_img, caption="Generated")
+        }, step=iteration)
+    else:
+        print(f"Warning: No images collected for logging at iteration {iteration}")
     
-    wandb.log({
-        "Real Image": wandb.Image(real_img, caption="Real"),
-        "Generated Image": wandb.Image(gen_img, caption="Generated")
-    }, step=iteration)
-    
+    # Final memory cleanup
     torch.cuda.empty_cache()
 
 
