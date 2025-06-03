@@ -27,15 +27,27 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHidd
 from utils.timer import Timer
 from utils.extra_utils import o3d_knn, weighted_l2_loss_v2, image_sampler, calculate_distances, sample_camera
 
-# import lpips
+import lpips
 from utils.scene_utils import render_training_image
 from time import time
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
+import wandb
+
+
+# Global LPIPS model for evaluation (initialized once)
+_lpips_model = None
+
+def get_lpips_model():
+    """Get or initialize the LPIPS model (singleton pattern)"""
+    global _lpips_model
+    if _lpips_model is None:
+        _lpips_model = lpips.LPIPS(net='vgg').cuda()
+    return _lpips_model
 
 
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, tb_writer, train_iter,timer, start_time):
+                         gaussians, scene, tb_writer, train_iter, timer, start_time):
     first_iter = 0
 
     gaussians.training_setup(opt)
@@ -154,6 +166,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
+            
+            # Fix to avoid memory issue
+            if dataset.loader != 'nerfies':
+                viewpoint_cam.original_image = None
         
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
@@ -242,7 +258,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
                     render_training_image(scene, gaussians, test_cams, render, pipe, background, iteration-1,timer.get_elapsed_time())
 
-            timer.start()
+            # Added comprehensive evaluation at regular intervals
+            if (iteration <= 3000 and iteration % 500 == 0) or \
+               (iteration > 3000 and iteration % 1000 == 0) or \
+               (iteration in testing_iterations):
+                timer.pause()
+                evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper)
+                timer.start()
+
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
@@ -276,6 +299,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     tb_writer = prepare_output_and_logger(expname)
+    
+    # Initialize wandb for logging with some relevant parameters
+    wandb.init(project="E-D3DGS", name=expname, config={
+        "dataset": str(dataset),
+        "iterations": opt.iterations,
+        "learning_rate": opt.position_lr_init,
+    })
+    
     gaussians = GaussianModel(dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
     timer = Timer()
@@ -313,8 +344,110 @@ def setup_seed(seed):
      np.random.seed(seed)
      random.seed(seed)
      torch.backends.cudnn.deterministic = True
-     
-     
+
+
+def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
+    """
+    Evaluate the model on test and train sets, computing L1, PSNR, SSIM, and LPIPS metrics.
+    Adapted from trainer.py to work with the function-based structure.
+    """
+    # Removed all torch.no_grad() calls as evaluate is called using torch.no_grad() above.
+    torch.cuda.empty_cache()
+    log_gen_images, log_real_images = [], []
+    f_scores, r_scores = [], []  # Not used in the originnal evaluate method. TODO: check with Olga if needed.
+
+    
+    # Get the LPIPS model (initialized once for the whole training process for efficiency. Quirk of using a functional approach.)
+    lpips_model = get_lpips_model()
+    
+    validation_configs = [
+        {
+            'name': 'test', 
+            'cameras': scene.getTestCameras(), 
+            'cam_idx': 0  # Index of camera to log images from. For now, use the first for simplicity, originally it was self.training_config.TEST_CAM_IDX_TO_LOG.
+        },
+        {
+            'name': 'train',
+            # Added min clauses just in case if the scene has less cameras than expected.
+            # 'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(150, len(scene.getTrainCameras()) - 1), 5)], 
+            # 'cam_idx': min(10, len(scene.getTrainCameras()) - 1)
+            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, 150, 5)], 
+            'cam_idx': 10
+        }
+    ]
+    
+    # Log number of Gaussians
+    wandb.log({"Number of Gaussians": len(gaussians._xyz)}, step=iteration)
+    
+    for config in validation_configs:
+        if config['cameras'] and len(config['cameras']) > 0:
+            l1_test = 0.0
+            psnr_test = 0.0
+            ssim_test = 0.0
+            lpips_test = 0.0
+            
+            for idx, viewpoint in enumerate(config['cameras']):
+                # Load image if needed (for lazy loading)
+                if hasattr(viewpoint, 'original_image') and viewpoint.original_image is None:
+                    if hasattr(viewpoint, 'load_image'):
+                        viewpoint.load_image()
+                
+                # Get camera number for render call
+                cam_no = viewpoint.cam_no if hasattr(viewpoint, 'cam_no') else 0
+                
+                # Render image with all necessary parameters
+                render_pkg = render(viewpoint, gaussians, pipe, background, cam_no=cam_no, iter=iteration)
+                                #   num_down_emb_c=hyper.min_embeddings, 
+                                #   num_down_emb_f=hyper.min_embeddings)
+                                # TODO: not sure if it is necessary to pass num_down_emb_c and num_down_emb_f here, and what they correspond to.
+                image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                gt_image = torch.clamp(viewpoint.original_image.cuda(), 0.0, 1.0)
+                
+                # Compute metrics
+                l1_test += l1_loss(image, gt_image).double()
+                psnr_test += psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).double()
+                ssim_value, _ = ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+                ssim_test += ssim_value.double()
+                lpips_test += lpips_model(image, gt_image).detach().double()
+                
+                # Collect images for logging
+                if idx == config['cam_idx']:
+                    log_gen_images.append(image)
+                    log_real_images.append(gt_image)
+            
+            # Average metrics
+            num_cameras = len(config['cameras'])
+            l1_test /= num_cameras
+            psnr_test /= num_cameras
+            ssim_test /= num_cameras
+            lpips_test /= num_cameras
+            
+            # Log metrics
+            wandb.log({
+                f"{config['name']}/L1": l1_test.item(),
+                f"{config['name']}/PSNR": psnr_test.item(),
+                f"{config['name']}/SSIM": ssim_test.item(),
+                f"{config['name']}/LPIPS": lpips_test.item()
+            }, step=iteration)
+            
+            # Print results
+            print(f"\n[ITER {iteration}], #{len(gaussians._xyz)} gaussians, Evaluating {config['name']}: "
+                  f"L1={l1_test.item():.6f}, PSNR={psnr_test.item():.6f}, "
+                  f"SSIM={ssim_test.item():.6f}, LPIPS={lpips_test.item():.6f}")
+    
+    # Log sample images
+    # Convert images to numpy for wandb logging
+    real_img = log_real_images[0].detach().cpu().permute(1, 2, 0).numpy()
+    gen_img = log_gen_images[0].detach().cpu().permute(1, 2, 0).numpy()
+    
+    wandb.log({
+        "Real Image": wandb.Image(real_img, caption="Real"),
+        "Generated Image": wandb.Image(gen_img, caption="Generated")
+    }, step=iteration)
+    
+    torch.cuda.empty_cache()
+
+
 if __name__ == "__main__":
     # Set up command line argument parser
     # torch.set_default_tensor_type('torch.FloatTensor')
