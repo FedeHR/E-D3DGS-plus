@@ -156,8 +156,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             frame_no = viewpoint_cam.frame_no
             cam_no_list.append(cam_no)
             frame_no_list.append(frame_no)
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, cam_no=cam_no, iter=iteration, \
-                num_down_emb_c=hyper.min_embeddings, num_down_emb_f=hyper.min_embeddings)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, 
+                              cam_no=cam_no, iter=iteration,
+                              num_down_emb_c=hyper.min_embeddings, 
+                              num_down_emb_f=hyper.min_embeddings)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
             images.append(image.unsqueeze(0))
@@ -396,10 +398,10 @@ def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
                 cam_no = viewpoint.cam_no if hasattr(viewpoint, 'cam_no') else 0
                 
                 # Render image with all necessary parameters
-                render_pkg = render(viewpoint, gaussians, pipe, background, cam_no=cam_no, iter=iteration)
-                                #   num_down_emb_c=hyper.min_embeddings, 
-                                #   num_down_emb_f=hyper.min_embeddings)
-                                # TODO: not sure if it is necessary to pass num_down_emb_c and num_down_emb_f here, and what they correspond to.
+                render_pkg = render(viewpoint, gaussians, pipe, background, 
+                                  cam_no=cam_no, iter=iteration,
+                                  num_down_emb_c=hyper.min_embeddings, 
+                                  num_down_emb_f=hyper.min_embeddings)
                 image = torch.clamp(render_pkg["render"], 0.0, 1.0)
                 gt_image = torch.clamp(viewpoint.original_image.cuda(), 0.0, 1.0)
                 
