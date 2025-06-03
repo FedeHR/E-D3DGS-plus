@@ -1,0 +1,22 @@
+1. Create env with python=3.7
+    conda create -n ed3dgs python=3.7
+    conda activate ed3dgs
+
+2. Install correct version of torch and cuda with conda
+    2.1 Libmamba solver can be useful to speed up the process
+        conda install --solver=libmamba pytorch=1.13.1 torchvision=0.14.1 torchaudio=0.13.1 pytorch-cuda=11.6 -c pytorch -c nvidia
+
+3. Change the gcc and g++ compiler version
+    export CC=/usr/bin/gcc-9
+    export CXX=/usr/bin/g++-9
+    export CUDAHOSTCXX=/usr/bin/g++-9
+
+4. Explicitly specify the CUDA architecture flag
+    export TORCH_CUDA_ARCH_LIST="6.0;7.0;7.5;8.0"
+
+5. pip install -e submodules/diff-gaussian-rasterization/
+
+6. pip install -e submodules/simple-knn/ 
+
+7. Install the rest of the requirements with pip
+    pip install -r requirements.txt (without torch dependencies)
