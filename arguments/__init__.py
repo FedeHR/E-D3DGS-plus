@@ -57,6 +57,9 @@ class ModelParams(ParamGroup):
         self.render_process=False
         self.loader = "colmap"
         self.shuffle = True
+        # FOURIER FEATURES: Add parameters for Fourier feature initialization
+        self.use_fourier_features = False
+        self.fourier_scale = 1.0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -88,6 +91,9 @@ class ModelHiddenParams(ParamGroup):
         self.no_c2f_temporal_embedding=False
         self.no_coarse_deform=False
         self.no_fine_deform=False
+        
+        # EXPERIMENT PARAMETERS: Add embedding initialization options
+        self.embedding_init = "random"  # random, zero, xavier, fourier
         
         self.total_num_frames=300
         self.c2f_temporal_iter=20000

@@ -126,7 +126,11 @@ class Scene:
                                                     "iteration_" + str(self.loaded_iter),
                                                    ))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
+            # FOURIER FEATURES: Pass Fourier feature parameters to Gaussian creation
+            use_fourier = getattr(args, 'use_fourier_features', False)
+            fourier_scale = getattr(args, 'fourier_scale', 1.0)
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime, 
+                                         use_fourier_features=use_fourier, fourier_scale=fourier_scale)
 
 
     def save(self, iteration):

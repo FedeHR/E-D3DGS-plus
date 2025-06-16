@@ -8,6 +8,10 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+# FOURIER FEATURES: Modified version of train.py with Fourier feature initialization
+# Based on "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"
+# https://proceedings.neurips.cc/paper/2020/file/55053683268957697aa39fba6f231c68-Paper.pdf
+
 import math
 import numpy as np
 import random
@@ -27,66 +31,27 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHidd
 from utils.timer import Timer
 from utils.extra_utils import o3d_knn, weighted_l2_loss_v2, image_sampler, calculate_distances, sample_camera
 
-# import lpips
+import lpips
 from utils.scene_utils import render_training_image
-import time
+from time import time
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
-
-# Import wandb for experiment tracking
 import wandb
 
-# Import LPIPS for evaluation
-from lpipsPyTorch import lpips
 
+# Global LPIPS model for evaluation (initialized once)
+_lpips_model = None
 
-def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
-    """Evaluate on test cameras and return metrics"""
-    test_cams = scene.getTestCameras()
-    
-    # Sample a subset of test cameras for efficiency (max 10)
-    if len(test_cams) > 10:
-        test_indices = np.random.choice(len(test_cams), 10, replace=False)
-        test_cams_sample = [test_cams[i] for i in test_indices]
-    else:
-        test_cams_sample = test_cams
-    
-    test_l1_losses = []
-    test_psnrs = []
-    test_ssims = []
-    test_lpips_scores = []
-    
-    with torch.no_grad():
-        for viewpoint_cam in test_cams_sample:
-            if type(viewpoint_cam.original_image) == type(None):
-                viewpoint_cam.load_image()
-            
-            cam_no = getattr(viewpoint_cam, 'cam_no', 0)
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, cam_no=cam_no, iter=iteration)
-            image = render_pkg["render"]
-            gt_image = viewpoint_cam.original_image.cuda()
-            
-            # Calculate metrics
-            l1_loss_val = l1_loss(image, gt_image)
-            psnr_val = psnr(image.unsqueeze(0), gt_image.unsqueeze(0))
-            ssim_val = ssim(image.unsqueeze(0), gt_image.unsqueeze(0))[0]
-            lpips_val = lpips(image.unsqueeze(0), gt_image.unsqueeze(0), net_type='alex')
-            
-            test_l1_losses.append(l1_loss_val.item())
-            test_psnrs.append(psnr_val.item())
-            test_ssims.append(ssim_val.item())
-            test_lpips_scores.append(lpips_val.item())
-    
-    return {
-        'test/L1': np.mean(test_l1_losses),
-        'test/PSNR': np.mean(test_psnrs),
-        'test/SSIM': np.mean(test_ssims),
-        'test/LPIPS': np.mean(test_lpips_scores)
-    }
+def get_lpips_model():
+    """Get or initialize the LPIPS model (singleton pattern)"""
+    global _lpips_model
+    if _lpips_model is None:
+        _lpips_model = lpips.LPIPS(net='vgg').cuda()
+    return _lpips_model
 
 
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, tb_writer, train_iter, timer, start_time, dataset_type):
+                         gaussians, scene, tb_writer, train_iter, timer, start_time):
     first_iter = 0
 
     gaussians.training_setup(opt)
@@ -146,7 +111,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     viewpoint_stack = train_cams
     method = None
 
-    start_time = time.time()
+    start_time = time()
     for iteration in range(first_iter, final_iter+1):             
         iter_start.record()
 
@@ -195,8 +160,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             frame_no = viewpoint_cam.frame_no
             cam_no_list.append(cam_no)
             frame_no_list.append(frame_no)
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, cam_no=cam_no, iter=iteration, \
-                num_down_emb_c=hyper.min_embeddings, num_down_emb_f=hyper.min_embeddings)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, 
+                              cam_no=cam_no, iter=iteration,
+                              num_down_emb_c=hyper.min_embeddings, 
+                              num_down_emb_f=hyper.min_embeddings)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
             images.append(image.unsqueeze(0))
@@ -205,6 +172,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
+            
+            # Fix to avoid memory issue
+            if dataset.loader != 'nerfies':
+                viewpoint_cam.original_image = None
         
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
@@ -216,7 +187,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         Ll1_items = Ll1.detach()
         Ll1 = Ll1.mean()
         if opt.lambda_dssim > 0. and type(sampled_frame_no) != type(None) or (method == "by_error" and (iteration % 10 == 0) and opt.num_multiview_ssim==0):
-            ssim_value, ssim_map = ssim(image_tensor, gt_image_tensor)
+            ssim_value, _ = ssim(image_tensor, gt_image_tensor)
             Lssim = (1 - ssim_value) / 2
             loss = Ll1 + opt.lambda_dssim * Lssim
         else:
@@ -253,9 +224,18 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         loss.backward()
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
-        for idx, viewspace_point_tensor_single in enumerate(viewspace_point_tensor_list):
-            viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_single.grad
+        for idx in range(0, len(viewspace_point_tensor_list)):
+            viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_list[idx].grad
         iter_end.record()
+
+        if iteration in saving_iterations:
+            elapsed_time = time()
+            
+            total_time_seconds = elapsed_time - start_time
+            hours, remainder = divmod(total_time_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            with open(os.path.join(args.model_path, 'training_time.txt'), 'a') as file:
+                file.write(f'Iteration {iteration}: {total_time_seconds} seconds ... {int(hours)}h {int(minutes)}m {seconds}sec  points: {gaussians._xyz.shape[0]}\n')
 
         with torch.no_grad():
             # Progress bar
@@ -269,43 +249,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
-            # Enhanced wandb logging every 100 iterations
-            if iteration % 100 == 0:
-                # Calculate train metrics
-                train_ssim_val = ssim(image_tensor, gt_image_tensor)[0].item()
-                train_lpips_val = lpips(image_tensor, gt_image_tensor, net_type='alex').item()
-                
-                # Get current learning rates
-                current_lr = gaussians.optimizer.param_groups[0]['lr']
-                
-                # Basic training metrics
-                wandb_metrics = {
-                    # Core metrics
-                    "Number of Gaussians": total_point,
-                    "iterations": iteration,
-                    "learning_rate": current_lr,
-                    "dataset": 1 if dataset_type == "dynerf" else 2 if dataset_type == "hypernerf" else 0,
-                    
-                    # Training metrics
-                    "train/L1": ema_loss_for_log,
-                    "train/PSNR": psnr_.item(),
-                    "train/SSIM": train_ssim_val,
-                    "train/LPIPS": train_lpips_val,
-                    
-                    # System metrics (ensure they're always available)
-                    "memory_allocated_GB": torch.cuda.memory_allocated() / 1024**3,
-                    "memory_reserved_GB": torch.cuda.memory_reserved() / 1024**3,
-                }
-                
-                wandb.log(wandb_metrics, step=iteration)
-
-            # Test evaluation every 1000 iterations
-            if iteration % 1000 == 0 and iteration > 0:
-                print(f"\n[ITER {iteration}] Running test evaluation...")
-                test_metrics = evaluate_test_cameras(gaussians, scene, pipe, background, iteration)
-                wandb.log(test_metrics, step=iteration)
-                print(f"Test metrics: PSNR={test_metrics['test/PSNR']:.2f}, SSIM={test_metrics['test/SSIM']:.3f}")
 
             # Log and save
             timer.pause()
@@ -321,7 +264,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
                     render_training_image(scene, gaussians, test_cams, render, pipe, background, iteration-1,timer.get_elapsed_time())
 
-            timer.start()
+            # Added comprehensive evaluation at regular intervals
+            if (iteration <= 3000 and iteration % 500 == 0) or \
+               (iteration > 3000 and iteration % 1000 == 0) or \
+               (iteration in testing_iterations):
+                timer.pause()
+                evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper)
+                timer.start()
+
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
@@ -356,93 +306,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     tb_writer = prepare_output_and_logger(expname)
     
-    # Initialize wandb for experiment tracking
-    wandb_project = os.getenv('WANDB_PROJECT', 'E-D3DGS')
-    wandb_entity = os.getenv('WANDB_ENTITY', None)
-    
-    # Create run name
-    import socket
-    hostname = socket.gethostname()
-    username = os.getenv('USER', 'unknown')
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    scene_name = dataset.source_path.split('/')[-1] if dataset.source_path else 'unknown'
-    run_name = f"{scene_name}_{username}_{hostname}_{timestamp}" if expname else f"{scene_name}_{username}_{hostname}_{timestamp}"
-    
-    # Detect dataset type from scene name
-    dataset_type = "unknown"
-    dynerf_scenes = ["coffee_martini", "cook_spinach", "cut_roasted_beef", "flame_salmon_1", "flame_steak", "sear_steak"]
-    hypernerf_scenes = ["aleks-teapot", "chickchicken", "cut-lemon", "hand", "slice-banana", "torchocolate", 
-                       "americano", "cross-hands", "espresso", "keyboard", "oven-mitts", "split-cookie", 
-                       "tamping", "3dprinter", "broom", "vrig-chicken", "peel-banana"]
-    
-    if scene_name in dynerf_scenes:
-        dataset_type = "dynerf"
-    elif scene_name in hypernerf_scenes:
-        dataset_type = "hypernerf"
-    elif hasattr(dataset, 'loader'):
-        dataset_type = dataset.loader
-    
-    # Enhanced wandb configuration with all required fields
-    config = {
-        # Experiment identification
-        "experiment_name": expname,
-        "dataset_type": dataset_type,  # Changed from "dataset" to avoid conflicts
-        "scene_name": scene_name,      # Changed from "scene" to be more specific
-        
-        # Key model parameters
-        "gaussian_embedding_dim": hyper.gaussian_embedding_dim,
-        "temporal_embedding_dim": hyper.temporal_embedding_dim,
-        "use_fourier_features": getattr(dataset, 'use_fourier_features', False),
-        "fourier_scale": getattr(dataset, 'fourier_scale', 1.0),
-        
-        # Training configuration
+    # Initialize wandb for logging with some relevant parameters
+    wandb.init(project="E-D3DGS-Fourier", name=expname, config={
+        "dataset": str(dataset),
         "iterations": opt.iterations,
-        "batch_size": opt.batch_size,
-        "resolution": getattr(dataset, '_resolution', -1),
-        "sh_degree": dataset.sh_degree,
-        
-        # Learning rates
-        "position_lr_init": opt.position_lr_init,
-        "position_lr_final": opt.position_lr_final,
-        "deformation_lr_init": opt.deformation_lr_init,
-        "deformation_lr_final": opt.deformation_lr_final,
-        "feature_lr": opt.feature_lr,
-        "opacity_lr": opt.opacity_lr,
-        "scaling_lr": opt.scaling_lr,
-        "rotation_lr": opt.rotation_lr,
-        
-        # Loss weights and regularization
-        "lambda_dssim": opt.lambda_dssim,
-        "reg_coef": opt.reg_coef,
-        "opacity_l1_coef_fine": getattr(opt, 'opacity_l1_coef_fine', 0.0),
-        "coef_tv_temporal_embedding": getattr(opt, 'coef_tv_temporal_embedding', 0.0),
-        
-        # Densification parameters
-        "densify_from_iter": opt.densify_from_iter,
-        "densify_until_iter": opt.densify_until_iter,
-        "densification_interval": opt.densification_interval,
-        "opacity_reset_interval": opt.opacity_reset_interval,
-        "densify_grad_threshold": getattr(opt, 'densify_grad_threshold_fine_init', 0.0002),
-        
-        # System info
-        "hostname": hostname,
-        "username": username,
-        "git_commit": os.popen('git rev-parse HEAD 2>/dev/null').read().strip()[:8],
-    }
-    
-    # Create comprehensive tags
-    tags = [dataset_type, scene_name, f"user_{username}", f"gdim_{hyper.gaussian_embedding_dim}", f"tdim_{hyper.temporal_embedding_dim}"]
-    if getattr(dataset, 'use_fourier_features', False):
-        tags.append(f"fourier_{getattr(dataset, 'fourier_scale', 1.0)}")
-    
-    wandb.init(
-        project=wandb_project,
-        entity=wandb_entity,
-        name=run_name,
-        config=config,
-        tags=tags,
-        notes=f"E-D3DGS training on {scene_name} dataset with {hyper.gaussian_embedding_dim}D gaussian embeddings and {hyper.temporal_embedding_dim}D temporal embeddings"
-    )
+        "learning_rate": opt.position_lr_init,
+        "use_fourier_features": dataset.use_fourier_features,
+        "fourier_scale": dataset.fourier_scale,
+    })
     
     gaussians = GaussianModel(dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
@@ -450,37 +321,16 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     scene = Scene(dataset, gaussians, shuffle=dataset.shuffle, loader=dataset.loader, duration=hyper.total_num_frames, opt=opt)
     timer.start()
     
-    # Log initial metrics after scene is loaded
-    initial_gaussians = gaussians._xyz.shape[0]
-    wandb.log({
-        "Number of Gaussians": initial_gaussians,
-        "iterations": 0,
-        "learning_rate": opt.position_lr_init,
-        "dataset": 1 if dataset_type == "dynerf" else 2 if dataset_type == "hypernerf" else 0,  # Numerical encoding
-    }, step=0)
-    
-    start_time = time.time()
+    start_time = time()
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, tb_writer, opt.iterations, timer, start_time, dataset_type)
-    end_time = time.time()
+                         gaussians, scene, tb_writer, opt.iterations, timer, start_time)
+    end_time = time()
     
     total_time_seconds = end_time - start_time
     hours, remainder = divmod(total_time_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    
-    # Log final metrics
-    final_gaussians = gaussians._xyz.shape[0]
-    wandb.log({
-        "Number of Gaussians": final_gaussians,
-        "Runtime": total_time_seconds,  # Added to match user requirements
-        "total_runtime_seconds": total_time_seconds,
-        "final_gaussian_count": final_gaussians,
-        "dataset": 1 if dataset_type == "dynerf" else 2 if dataset_type == "hypernerf" else 0,
-    }, step=opt.iterations)
-    
     print(f"training time: {int(hours)}h {int(minutes)}m {seconds}sec")
-    wandb.finish()
 
 
 def prepare_output_and_logger(expname):    
@@ -502,13 +352,124 @@ def setup_seed(seed):
      np.random.seed(seed)
      random.seed(seed)
      torch.backends.cudnn.deterministic = True
-     
-     
+
+
+def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
+    """
+    Evaluate the model on test and train sets, computing L1, PSNR, SSIM, and LPIPS metrics.
+    Adapted from trainer.py to work with the function-based structure.
+    """
+    # Removed all torch.no_grad() calls as evaluate is called using torch.no_grad() above.
+    torch.cuda.empty_cache()
+    log_gen_images, log_real_images = [], []
+    f_scores, r_scores = [], []  # Not used in the originnal evaluate method. TODO: check with Olga if needed.
+
+    
+    # Get the LPIPS model (initialized once for the whole training process for efficiency. Quirk of using a functional approach.)
+    lpips_model = get_lpips_model()
+    
+    validation_configs = [
+        {
+            'name': 'test', 
+            'cameras': scene.getTestCameras(), 
+            'cam_idx': 0  # Index of camera to log images from. For now, use the first for simplicity, originally it was self.training_config.TEST_CAM_IDX_TO_LOG.
+        },
+        {
+            'name': 'train',
+            # Reduced cameras from 150 to 20 cameras to save memory
+            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(20, len(scene.getTrainCameras())), 5)], 
+            'cam_idx': min(3, len(scene.getTrainCameras()) - 1) if len(scene.getTrainCameras()) > 0 else 0
+        }
+    ]
+    
+    # Log number of Gaussians
+    wandb.log({"Number of Gaussians": len(gaussians._xyz.detach().cpu())}, step=iteration)
+    
+    for config in validation_configs:
+        if config['cameras'] and len(config['cameras']) > 0:
+            l1_test = 0.0
+            psnr_test = 0.0
+            ssim_test = 0.0
+            lpips_test = 0.0
+            
+            for idx, viewpoint in enumerate(config['cameras']):
+                # Load image if needed (for lazy loading)
+                if hasattr(viewpoint, 'original_image') and viewpoint.original_image is None:
+                    if hasattr(viewpoint, 'load_image'):
+                        viewpoint.load_image()
+                
+                # Get camera number for render call
+                cam_no = viewpoint.cam_no if hasattr(viewpoint, 'cam_no') else 0
+                
+                # Render image with all necessary parameters
+                render_pkg = render(viewpoint, gaussians, pipe, background, 
+                                  cam_no=cam_no, iter=iteration,
+                                  num_down_emb_c=hyper.min_embeddings, 
+                                  num_down_emb_f=hyper.min_embeddings)
+                image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                gt_image = torch.clamp(viewpoint.original_image.cuda(), 0.0, 1.0)
+                
+                # Compute metrics
+                l1_test += l1_loss(image, gt_image).double()
+                psnr_test += psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).double()
+                ssim_value, _ = ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+                ssim_test += ssim_value.double()
+                lpips_test += lpips_model(image, gt_image).detach().double()
+                
+                # Collect images for logging
+                if idx == config['cam_idx']:
+                    log_gen_images.append(image)
+                    log_real_images.append(gt_image)
+                
+                # Clear intermediate tensors every few iterations to prevent memory buildup
+                if idx % 5 == 0:
+                    torch.cuda.empty_cache()
+            
+            # Average metrics
+            num_cameras = len(config['cameras'])
+            l1_test /= num_cameras
+            psnr_test /= num_cameras
+            ssim_test /= num_cameras
+            lpips_test /= num_cameras
+            
+            # Log metrics
+            wandb.log({
+                f"{config['name']}/L1": l1_test.detach().cpu().item(),
+                f"{config['name']}/PSNR": psnr_test.detach().cpu().item(),
+                f"{config['name']}/SSIM": ssim_test.detach().cpu().item(),
+                f"{config['name']}/LPIPS": lpips_test.detach().cpu().item()
+            }, step=iteration)
+            
+            # Print results
+            print(f"\n[ITER {iteration}], #{len(gaussians._xyz)} gaussians, Evaluating {config['name']}: "
+                  f"L1={l1_test.item():.6f}, PSNR={psnr_test.item():.6f}, "
+                  f"SSIM={ssim_test.item():.6f}, LPIPS={lpips_test.item():.6f}")
+        
+        # Added: clear memory between test and train evaluation
+        torch.cuda.empty_cache()
+    
+    # Log sample images
+    if log_gen_images and log_real_images:
+        # Convert images to numpy for wandb logging
+        real_img = log_real_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        gen_img = log_gen_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        
+        wandb.log({
+            "Real Image": wandb.Image(real_img, caption="Real"),
+            "Generated Image": wandb.Image(gen_img, caption="Generated")
+        }, step=iteration)
+    else:
+        print(f"Warning: No images collected for logging at iteration {iteration}")
+    
+    # Final memory cleanup
+    torch.cuda.empty_cache()
+
+
 if __name__ == "__main__":
     # Set up command line argument parser
     # torch.set_default_tensor_type('torch.FloatTensor')
     torch.cuda.empty_cache()
-    parser = ArgumentParser(description="Training script parameters")
+    parser = ArgumentParser(description="Training script parameters with Fourier Features")
     setup_seed(6666)
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
@@ -526,14 +487,27 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     
+    # FOURIER FEATURES: Add command line arguments for Fourier features
+    parser.add_argument("--use_fourier_features", action="store_true", 
+                       help="Use Fourier feature initialization for Gaussian embeddings")
+    parser.add_argument("--fourier_scale", type=float, default=1.0,
+                       help="Scale parameter for Fourier feature frequency sampling (default: 1.0)")
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+    
+    # FOURIER FEATURES: Set the Fourier feature parameters in dataset args
+    lp.use_fourier_features = args.use_fourier_features
+    lp.fourier_scale = args.fourier_scale
+    
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+    
     print("Optimizing " + args.model_path)
+    print(f"FOURIER FEATURES: Enabled={args.use_fourier_features}, Scale={args.fourier_scale}")
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
@@ -544,4 +518,4 @@ if __name__ == "__main__":
     training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
 
     # All done
-    print("\nTraining complete.")
+    print("\nTraining complete.") 

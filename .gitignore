@@ -1,2 +1,102 @@
+# Python
 __pycache__/
-output
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Data and datasets
+output/
+datasets/
+data/
+*.h5
+*.hdf5
+*.npz
+*.npy
+
+# Results and outputs
+results/
+wandb/
+*.ckpt
+*.pth
+*.pt
+*.pkl
+*.pickle
+
+# Logs and temporary files
+*.log
+*.out
+*.err
+experiments/slurm_logs/
+experiments/slurm_jobs/
+slurm-*.out
+*.tmp
+*.temp
+.nfs*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# System files
+*.pid
+*.lock
+
+# Compiled CUDA extensions
+*.o
+*.so
+*.dylib
+*.dll
+
+# Generated experiment scripts
+experiments/slurm_jobs/**/*.sh
+experiments/slurm_logs/**/*
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Large model files and checkpoints
+*.safetensors
+*.bin
+model.pt
+pytorch_model.bin
+
+# Configuration files with sensitive data
+.env.local
+.env.production
+config.local.*
