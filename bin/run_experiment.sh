@@ -11,7 +11,9 @@ SCENE=""
 GDIM=32
 TDIM=256
 FOURIER_SCALE=0
-EMBEDDING_INIT="random"
+NUM_FREQ_BANDS=""
+EMBEDDING_INIT="zero"  # Changed to match current default
+TEMPORAL_EMBEDDING_INIT="normal"
 GPU=0
 RESOLUTION=2
 SLURM=true  # Default to SLURM mode
@@ -26,6 +28,7 @@ SAVE_PATH="results"
 # SLURM parameters - Fixed for abakus compatibility
 SLURM_PARTITION="NvidiaAll"  # Default to NvidiaAll which works reliably
 SLURM_QOS=""  # No QoS by default
+SLURM_RESERVATION=""  # No reservation by default
 SLURM_TIME="48:00:00"
 SLURM_MEM=""  # No memory specification to avoid errors
 SLURM_GPUS="1"
@@ -116,7 +119,13 @@ Model Parameters:
   --gdim DIM              Gaussian embedding dimension (default: 32)
   --tdim DIM              Temporal embedding dimension (default: 256)
   --fourier_scale SCALE   Fourier features scale, 0=disabled (default: 0)
-  --embedding_init TYPE   Embedding initialization: random, zero, xavier (default: random)
+  --num_freq_bands N      Number of frequency bands for structured Fourier (optional)
+  --embedding_init TYPE   Gaussian embedding initialization (default: zero)
+                          Options: zero, random, normal, xavier, xavier_uniform, xavier_normal,
+                                  kaiming, he_uniform, kaiming_normal, he_normal, uniform,
+                                  fourier, positional, structured_fourier, learned_fourier
+  --temporal_init TYPE    Temporal embedding initialization (default: normal)
+                          Options: zero, normal, random, xavier_uniform, xavier_normal, sinusoidal
 
 Training Options:
   --gpu GPU_ID            GPU to use (default: 0)
@@ -132,7 +141,8 @@ Execution Options:
 
 SLURM Options (only used with --slurm):
   --partition PART        SLURM partition (default: NvidiaAll)
-  --abakus                Use Abaki partition with abaki QoS (high priority)
+  --abakus                Use Abaki partition with abaki QoS (auto-detects reservations)
+  --reservation NAME      Manually specify reservation (compvis25_So, compvis25_Mo)
   --time TIME             SLURM time limit (default: 48:00:00)
   --cpus CPUS             SLURM CPUs (default: 8)
 
@@ -155,10 +165,13 @@ Examples:
   $0 --scene cut_roasted_beef --gdim 64 --tdim 512
 
   # Enable Fourier features
-  $0 --scene vrig-chicken --fourier_scale 4.0
+  $0 --scene vrig-chicken --embedding_init fourier --fourier_scale 4.0
 
-  # Use high-priority Abaki partition
+  # Use high-priority Abaki partition (auto-detects reservations)
   $0 --scene cut_roasted_beef --abakus
+
+  # Use Abaki with specific reservation (Sunday/Monday)
+  $0 --scene cut_roasted_beef --abakus --reservation compvis25_So
 
   # Run locally (no SLURM)
   $0 --scene cut_roasted_beef --no_slurm
@@ -189,8 +202,16 @@ while [[ $# -gt 0 ]]; do
             FOURIER_SCALE="$2"
             shift 2
             ;;
+        --num_freq_bands)
+            NUM_FREQ_BANDS="$2"
+            shift 2
+            ;;
         --embedding_init)
             EMBEDDING_INIT="$2"
+            shift 2
+            ;;
+        --temporal_init)
+            TEMPORAL_EMBEDDING_INIT="$2"
             shift 2
             ;;
         --gpu)
@@ -228,7 +249,22 @@ while [[ $# -gt 0 ]]; do
         --abakus)
             SLURM_PARTITION="Abaki"
             SLURM_QOS="abaki"
+            # Auto-detect reservation based on current day
+            current_day=$(date +%u)  # 1=Monday, 7=Sunday
+            if [[ "$current_day" == "7" ]]; then
+                SLURM_RESERVATION="compvis25_So"
+                echo "🎯 Sunday detected - using compvis25_So reservation"
+            elif [[ "$current_day" == "1" ]]; then
+                SLURM_RESERVATION="compvis25_Mo"
+                echo "🎯 Monday detected - using compvis25_Mo reservation"
+            else
+                echo "⚠️  Outside reservation period (Sun/Mon) - using regular Abaki queue"
+            fi
             shift
+            ;;
+        --reservation)
+            SLURM_RESERVATION="$2"
+            shift 2
             ;;
         --time)
             SLURM_TIME="$2"
@@ -261,27 +297,30 @@ fi
 # Auto-detect dataset type
 DATASET=$(detect_dataset_type "$SCENE")
 
-# Generate experiment name following the convention
+# Generate experiment name following the convention: dataset/scene-gdim32-tdim256-fourier4
 generate_exp_name() {
     local exp_name="${DATASET}/${SCENE}"
     
-    # Add non-default parameters to name
-    local params=""
+    # Always add dimensions first
+    local params="-gdim${GDIM}-tdim${TDIM}"
     
-    if [[ "$GDIM" != "32" ]]; then
-        params="${params}_gdim${GDIM}"
+    # Add frequency bands for structured Fourier (if specified)
+    if [[ -n "$NUM_FREQ_BANDS" ]]; then
+        params="${params}-bands${NUM_FREQ_BANDS}"
     fi
     
-    if [[ "$TDIM" != "256" ]]; then
-        params="${params}_tdim${TDIM}"
-    fi
-    
+    # Add Fourier features or initialization method at the end
     if [[ "$FOURIER_SCALE" != "0" ]]; then
-        params="${params}_fourier${FOURIER_SCALE}"
+        # Using Fourier features - add fourier scale at the end
+        params="${params}-fourier${FOURIER_SCALE}"
+    elif [[ "$EMBEDDING_INIT" != "zero" ]]; then
+        # Not using Fourier but using non-default initialization
+        params="${params}-${EMBEDDING_INIT}"
     fi
     
-    if [[ "$EMBEDDING_INIT" != "random" ]]; then
-        params="${params}_${EMBEDDING_INIT}"
+    # Add temporal initialization if non-default
+    if [[ "$TEMPORAL_EMBEDDING_INIT" != "normal" ]]; then
+        params="${params}-temporal${TEMPORAL_EMBEDDING_INIT}"
     fi
     
     echo "${exp_name}${params}"
@@ -313,6 +352,15 @@ echo "   Embedding init: $EMBEDDING_INIT"
 echo "   GPU: $GPU"
 echo "   Resolution: $RESOLUTION"
 echo "   SLURM: $SLURM"
+if [[ "$SLURM" == "true" ]]; then
+    echo "   SLURM partition: $SLURM_PARTITION"
+    if [[ -n "$SLURM_QOS" ]]; then
+        echo "   SLURM QoS: $SLURM_QOS"
+    fi
+    if [[ -n "$SLURM_RESERVATION" ]]; then
+        echo "   SLURM reservation: $SLURM_RESERVATION"
+    fi
+fi
 echo "   Dry run: $DRY_RUN"
 
 if [[ "$SLURM" == "true" ]]; then
@@ -338,6 +386,11 @@ EOF
     # Add QoS only if specified
     if [[ -n "$SLURM_QOS" ]]; then
         echo "#SBATCH --qos=$SLURM_QOS" >> "$SLURM_SCRIPT"
+    fi
+
+    # Add reservation only if specified
+    if [[ -n "$SLURM_RESERVATION" ]]; then
+        echo "#SBATCH --reservation=$SLURM_RESERVATION" >> "$SLURM_SCRIPT"
     fi
 
     cat >> "$SLURM_SCRIPT" << EOF
@@ -385,7 +438,7 @@ echo "STARTED|\$(date)" > experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${p
 # Training
 echo "🚀 Starting training..."
 echo "TRAINING|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
-CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION
+CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
 
 if [ \$? -eq 0 ]; then
     echo "✅ Training completed successfully!"

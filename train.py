@@ -360,13 +360,19 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     wandb_project = os.getenv('WANDB_PROJECT', 'E-D3DGS')
     wandb_entity = os.getenv('WANDB_ENTITY', None)
     
-    # Create run name
+    # Create run name following the convention: dataset/scene-fourier4-gdim8
     import socket
     hostname = socket.gethostname()
     username = os.getenv('USER', 'unknown')
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     scene_name = dataset.source_path.split('/')[-1] if dataset.source_path else 'unknown'
-    run_name = f"{scene_name}_{username}_{hostname}_{timestamp}" if expname else f"{scene_name}_{username}_{hostname}_{timestamp}"
+    
+    # Use expname if provided (which follows the correct convention), otherwise create one
+    if expname:
+        run_name = expname
+    else:
+        # Fallback to old naming if no expname provided
+        run_name = f"{scene_name}_{username}_{hostname}_{timestamp}"
     
     # Detect dataset type from scene name
     dataset_type = "unknown"
@@ -392,8 +398,11 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         # Key model parameters
         "gaussian_embedding_dim": hyper.gaussian_embedding_dim,
         "temporal_embedding_dim": hyper.temporal_embedding_dim,
+        "embedding_init": getattr(hyper, 'embedding_init', 'zero'),
+        "temporal_embedding_init": getattr(hyper, 'temporal_embedding_init', 'normal'),
         "use_fourier_features": getattr(dataset, 'use_fourier_features', False),
         "fourier_scale": getattr(dataset, 'fourier_scale', 1.0),
+        "num_freq_bands": getattr(dataset, 'num_freq_bands', None),
         
         # Training configuration
         "iterations": opt.iterations,
@@ -432,8 +441,18 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     
     # Create comprehensive tags
     tags = [dataset_type, scene_name, f"user_{username}", f"gdim_{hyper.gaussian_embedding_dim}", f"tdim_{hyper.temporal_embedding_dim}"]
-    if getattr(dataset, 'use_fourier_features', False):
-        tags.append(f"fourier_{getattr(dataset, 'fourier_scale', 1.0)}")
+    
+    # Add embedding initialization tags
+    embedding_init = getattr(hyper, 'embedding_init', 'zero')
+    if embedding_init != 'zero':
+        tags.append(f"init_{embedding_init}")
+    
+    # Add Fourier features tags
+    if getattr(dataset, 'use_fourier_features', False) or embedding_init in ['fourier', 'structured_fourier']:
+        fourier_scale = getattr(dataset, 'fourier_scale', 1.0)
+        tags.append(f"fourier_{fourier_scale}")
+        if embedding_init == 'structured_fourier':
+            tags.append("structured_fourier")
     
     wandb.init(
         project=wandb_project,
@@ -526,6 +545,8 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     
+    # Enhanced embedding parameters are handled by arguments/__init__.py
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
@@ -533,6 +554,17 @@ if __name__ == "__main__":
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+    
+    # Embedding dimensions are handled by the argument groups automatically
+    
+    # The embedding initialization parameters are already handled by the argument groups
+    # Legacy compatibility for Fourier features
+    if hasattr(lp, 'embedding_init') and lp.embedding_init in ['fourier', 'positional', 'structured_fourier', 'learned_fourier']:
+        lp.use_fourier_features = True
+    elif hasattr(hp, 'embedding_init') and hp.embedding_init in ['fourier', 'positional', 'structured_fourier', 'learned_fourier']:
+        lp.use_fourier_features = True
+    else:
+        lp.use_fourier_features = False
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

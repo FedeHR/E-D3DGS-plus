@@ -21,8 +21,9 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
-# FOURIER FEATURES: Import for positional encoding initialization
+# ENHANCED EMBEDDINGS: Import for comprehensive embedding initialization
 from utils.fourier_features import create_fourier_embeddings
+from utils.embedding_init import EmbeddingInitializer, print_initialization_info
 
 
 class GaussianModel:
@@ -145,7 +146,9 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int, use_fourier_features=False, fourier_scale=1.0):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int, 
+                       embedding_init='zero', temporal_embedding_init='normal', 
+                       fourier_scale=1.0, num_freq_bands=None, **init_kwargs):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
@@ -164,18 +167,19 @@ class GaussianModel:
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         
-        # FOURIER FEATURES: Initialize embeddings with Fourier features based on 3D positions
-        if use_fourier_features:
-            print(f"Initializing Gaussian embeddings with Fourier features (scale={fourier_scale})")
-            embedding = create_fourier_embeddings(
-                positions=fused_point_cloud,
-                embedding_dim=self._deformation.gaussian_embedding_dim,
-                scale=fourier_scale,
-                device="cuda"
-            )
-        else:
-            # ORIGINAL: Zero initialization (comment out to disable)
-            embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
+        # ENHANCED EMBEDDINGS: Initialize Gaussian embeddings with comprehensive strategies
+        print_initialization_info(embedding_init, self._deformation.gaussian_embedding_dim, 
+                                 fourier_scale=fourier_scale, num_freq_bands=num_freq_bands, **init_kwargs)
+        
+        embedding = EmbeddingInitializer.initialize_gaussian_embeddings(
+            positions=fused_point_cloud,
+            embedding_dim=self._deformation.gaussian_embedding_dim,
+            init_type=embedding_init,
+            device="cuda",
+            fourier_scale=fourier_scale,
+            num_freq_bands=num_freq_bands,
+            **init_kwargs
+        )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 

@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.cpp_extension import load
 import torch.nn.init as init
+from utils.embedding_init import EmbeddingInitializer
 
 
 class deform_network(nn.Module):
@@ -29,10 +30,18 @@ class deform_network(nn.Module):
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
         self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net()
 
+        # Initialize temporal embeddings with configurable strategies
+        temporal_init_type = getattr(args, 'temporal_embedding_init', 'normal')
         if args.zero_temporal:
-            self.weight = torch.nn.Parameter(torch.zeros(max_embeddings, self.temporal_embedding_dim))
-        else:
-            self.weight = torch.nn.Parameter(torch.normal(0., 0.01/np.sqrt(self.temporal_embedding_dim),size=(max_embeddings, self.temporal_embedding_dim)))
+            temporal_init_type = 'zero'
+        
+        temporal_embeddings = EmbeddingInitializer.initialize_temporal_embeddings(
+            num_frames=max_embeddings,
+            embedding_dim=self.temporal_embedding_dim,
+            init_type=temporal_init_type,
+            device='cuda'
+        )
+        self.weight = torch.nn.Parameter(temporal_embeddings)
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
     def create_net(self):

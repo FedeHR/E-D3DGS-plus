@@ -126,11 +126,21 @@ class Scene:
                                                     "iteration_" + str(self.loaded_iter),
                                                    ))
         else:
-            # FOURIER FEATURES: Pass Fourier feature parameters to Gaussian creation
-            use_fourier = getattr(args, 'use_fourier_features', False)
+            # ENHANCED EMBEDDINGS: Pass embedding initialization parameters to Gaussian creation
+            embedding_init = getattr(args, 'embedding_init', 'zero')
+            temporal_embedding_init = getattr(args, 'temporal_embedding_init', 'normal')
             fourier_scale = getattr(args, 'fourier_scale', 1.0)
+            num_freq_bands = getattr(args, 'num_freq_bands', None)
+            
+            # Legacy compatibility
+            if getattr(args, 'use_fourier_features', False):
+                embedding_init = 'fourier'
+            
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime, 
-                                         use_fourier_features=use_fourier, fourier_scale=fourier_scale)
+                                         embedding_init=embedding_init,
+                                         temporal_embedding_init=temporal_embedding_init,
+                                         fourier_scale=fourier_scale,
+                                         num_freq_bands=num_freq_bands)
 
 
     def save(self, iteration):
