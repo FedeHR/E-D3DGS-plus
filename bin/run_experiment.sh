@@ -326,15 +326,45 @@ generate_exp_name() {
     echo "${exp_name}${params}"
 }
 
+# Memory estimation function
+estimate_memory_requirements() {
+    local gdim=$1
+    local tdim=$2
+    local dataset=$3
+    
+    # Base memory requirements in GB
+    local base_memory=8  # Minimum for CUDA operations
+    
+    # Memory scaling factors (empirically determined)
+    if [[ "$dataset" == "dynerf" ]]; then
+        local scene_factor=1.2  # DyNeRF scenes are generally lighter
+    else
+        local scene_factor=1.5  # HyperNeRF scenes are heavier
+    fi
+    
+    # Embedding memory scaling
+    local embedding_memory=$((gdim * tdim / 1000))  # Rough estimate
+    
+    # Total estimated memory with safety margin
+    local total_memory=$(echo "$base_memory + $embedding_memory * $scene_factor" | bc -l)
+    local safe_memory=$(echo "$total_memory * 1.3" | bc -l)
+    
+    printf "%.0f" "$safe_memory"
+}
+
 # Generate timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Generate experiment name
 EXP_NAME=$(generate_exp_name)
 
-# Create directory structure
+# Estimate memory requirements
+ESTIMATED_MEMORY=$(estimate_memory_requirements $GDIM $TDIM $DATASET)
+
+# Create directory structure with organized logs
 mkdir -p experiments/slurm_jobs/$DATASET
 mkdir -p experiments/slurm_logs/$DATASET
+mkdir -p experiments/slurm_logs/$DATASET/${EXP_NAME##*/}
 
 # Generate SLURM script filename
 SLURM_SCRIPT="experiments/slurm_jobs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}.sh"
@@ -349,11 +379,19 @@ echo "   Gaussian embedding dim: $GDIM"
 echo "   Temporal embedding dim: $TDIM"
 echo "   Fourier scale: $FOURIER_SCALE $([ "$FOURIER_SCALE" = "0" ] && echo "(disabled - original behavior)" || echo "(enabled)")"
 echo "   Embedding init: $EMBEDDING_INIT"
+echo "   💾 Estimated memory: ${ESTIMATED_MEMORY}GB"
 echo "   GPU: $GPU"
 echo "   Resolution: $RESOLUTION"
 echo "   SLURM: $SLURM"
 if [[ "$SLURM" == "true" ]]; then
     echo "   SLURM partition: $SLURM_PARTITION"
+    if [[ -n "$SLURM_MEM" ]]; then
+        echo "   SLURM memory request: $SLURM_MEM"
+    elif [[ "$SLURM_PARTITION" != "NvidiaAll" ]]; then
+        echo "   SLURM memory request: ${ESTIMATED_MEMORY}G"
+    else
+        echo "   SLURM memory request: auto (no limit for NvidiaAll)"
+    fi
     if [[ -n "$SLURM_QOS" ]]; then
         echo "   SLURM QoS: $SLURM_QOS"
     fi
@@ -367,20 +405,27 @@ if [[ "$SLURM" == "true" ]]; then
     echo ""
     echo "🔧 Generating SLURM script..."
     
-    # Generate SLURM script
+    # Create organized log directory within dataset folder
+    LOG_DIR="experiments/slurm_logs/$DATASET/${EXP_NAME##*/}"
+    mkdir -p "$LOG_DIR"
+    
+    # Generate SLURM script with better organization
     cat > "$SLURM_SCRIPT" << EOF
 #!/bin/bash
-#SBATCH --job-name=${DATASET}_${SCENE}_${TIMESTAMP}
+#SBATCH --job-name=${EXP_NAME/\//_}
 #SBATCH --partition=$SLURM_PARTITION
 #SBATCH --time=$SLURM_TIME
 #SBATCH --cpus-per-task=$SLURM_CPUS
-#SBATCH --output=experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_%j.out
-#SBATCH --error=experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_%j.err
+#SBATCH --output=$LOG_DIR/${TIMESTAMP}_%j.out
+#SBATCH --error=$LOG_DIR/${TIMESTAMP}_%j.err
+#SBATCH --kill-on-invalid-dep=yes
 EOF
 
-    # Add memory specification only if provided
+    # Add memory specification only if explicitly provided or not using NvidiaAll
     if [[ -n "$SLURM_MEM" ]]; then
         echo "#SBATCH --mem=$SLURM_MEM" >> "$SLURM_SCRIPT"
+    elif [[ "$SLURM_PARTITION" != "NvidiaAll" ]]; then
+        echo "#SBATCH --mem=${ESTIMATED_MEMORY}G" >> "$SLURM_SCRIPT"
     fi
 
     # Add QoS only if specified
@@ -415,15 +460,48 @@ source bin/setup_wandb_team.sh
 # Change to project directory
 cd \$SLURM_SUBMIT_DIR
 
+# Enhanced crash detection setup
+trap 'handle_crash \$? \$LINENO' ERR
+trap 'handle_termination SIGTERM' TERM
+trap 'handle_termination SIGKILL' KILL
+
+handle_crash() {
+    echo "=== CRASH DETECTED ==="
+    echo "Exit code: \$1"
+    echo "Line: \$2"
+    echo "Time: \$(date)"
+    echo "Job ID: \$SLURM_JOB_ID"
+    echo "Node: \$SLURMD_NODENAME"
+    echo "===== SYSTEM INFO ====="
+    nvidia-smi || echo "GPU info unavailable"
+    echo "Memory usage:"
+    free -h
+    echo "Disk usage:"
+    df -h \$TMPDIR 2>/dev/null || df -h /tmp
+    echo "==================="
+    exit \$1
+}
+
+handle_termination() {
+    echo "=== JOB TERMINATED ==="
+    echo "Signal: \$1"
+    echo "Time: \$(date)"
+    echo "Job ID: \$SLURM_JOB_ID"
+    echo "Likely cause: Memory limit exceeded (OOM)"
+    echo "==================="
+    exit 143
+}
+
 echo "🚀 E-D3DGS Experiment Starting"
 echo "=============================="
-echo "Job Name: ${DATASET}_${SCENE}_${TIMESTAMP}"
+echo "Job Name: ${EXP_NAME/\//_}"
 echo "Experiment: $EXP_NAME"
 echo "Dataset: $DATASET (auto-detected)"
 echo "Scene: $SCENE"
 echo "Gaussian dim: $GDIM"
 echo "Temporal dim: $TDIM"
 echo "Fourier scale: $FOURIER_SCALE"
+echo "Estimated memory: ${ESTIMATED_MEMORY}G"
 echo "SLURM Job ID: \$SLURM_JOB_ID"
 echo "Node: \$SLURMD_NODENAME"
 echo "Partition: \$SLURM_JOB_PARTITION"
@@ -432,17 +510,36 @@ echo "GPU: \$CUDA_VISIBLE_DEVICES"
 echo "Started: \$(date)"
 echo "=============================="
 
-# Create progress tracking file
-echo "STARTED|\$(date)" > experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+# System monitoring
+echo "=== INITIAL SYSTEM STATE ==="
+nvidia-smi
+echo "Memory info:"
+free -h
+echo "=========================="
 
-# Training
+# Create progress tracking file in organized location
+PROGRESS_FILE="$LOG_DIR/${TIMESTAMP}_\$SLURM_JOB_ID.progress"
+echo "STARTED|\$(date)|\$SLURM_JOB_ID|\$SLURMD_NODENAME" > "\$PROGRESS_FILE"
+
+# Training with memory monitoring
 echo "🚀 Starting training..."
-echo "TRAINING|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+echo "TRAINING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
+
+# Monitor memory usage during training
+( while sleep 30; do
+    echo "\$(date): GPU Memory:" >> "$LOG_DIR/${TIMESTAMP}_\$SLURM_JOB_ID.monitor"
+    nvidia-smi --query-gpu=memory.used,memory.total --format=csv >> "$LOG_DIR/${TIMESTAMP}_\$SLURM_JOB_ID.monitor"
+done ) &
+MONITOR_PID=\$!
+
 CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
+
+# Stop monitoring
+kill \$MONITOR_PID 2>/dev/null || true
 
 if [ \$? -eq 0 ]; then
     echo "✅ Training completed successfully!"
-    echo "TRAINING_DONE|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+    echo "TRAINING_DONE|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     
 EOF
 
@@ -450,15 +547,15 @@ EOF
         cat >> "$SLURM_SCRIPT" << EOF
     # Rendering
     echo "🎨 Starting rendering..."
-    echo "RENDERING|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+    echo "RENDERING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --skip_train --configs arguments/$DATASET/$SCENE.py
     
     if [ \$? -eq 0 ]; then
         echo "✅ Rendering completed successfully!"
-        echo "RENDERING_DONE|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+        echo "RENDERING_DONE|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     else
         echo "❌ Rendering failed!"
-        echo "RENDERING_FAILED|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+        echo "RENDERING_FAILED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
         exit 1
     fi
     
@@ -469,15 +566,15 @@ EOF
         cat >> "$SLURM_SCRIPT" << EOF
     # Evaluation
     echo "📈 Starting evaluation..."
-    echo "EVALUATION|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+    echo "EVALUATION|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}
     
     if [ \$? -eq 0 ]; then
         echo "✅ Evaluation completed successfully!"
-        echo "COMPLETED|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+        echo "COMPLETED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     else
         echo "❌ Evaluation failed!"
-        echo "EVALUATION_FAILED|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+        echo "EVALUATION_FAILED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
         exit 1
     fi
     
@@ -487,7 +584,7 @@ EOF
     cat >> "$SLURM_SCRIPT" << EOF
 else
     echo "❌ Training failed!"
-    echo "TRAINING_FAILED|\$(date)" >> experiments/slurm_logs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}_progress.txt
+    echo "TRAINING_FAILED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     exit 1
 fi
 

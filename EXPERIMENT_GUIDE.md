@@ -217,7 +217,16 @@ Examples:
 [hypernerf, vrig-chicken, user_kerschern, gdim_16, tdim_128, fourier_2.0]
 ```
 
-## 📈 Monitoring Experiments
+## 📈 Monitoring & Logging
+
+### Enhanced Experiment Monitoring
+
+**New Features:**
+- 🗂️ **Organized Log Structure**: Logs organized by experiment name
+- 💾 **Memory Estimation**: Automatic memory requirement calculation
+- 🔍 **Enhanced Crash Detection**: Detailed error reporting with system state
+- 📊 **Real-time Memory Monitoring**: GPU memory usage tracked during training
+- 🆔 **Job ID Integration**: Easy matching between SLURM jobs and log files
 
 ### Monitoring Commands
 
@@ -227,26 +236,61 @@ Examples:
 | `--logs, -l [JOB]` | Show logs for specific job | `./tools/monitor_experiments.sh -l 12369` |
 | `--watch, -w [JOB]` | Watch logs in real-time | `./tools/monitor_experiments.sh -w` |
 
-### File Organization
+### Organized Log Structure
 
-**Automatic Organization by Dataset:**
+**Organized Structure Within Dataset Folders:**
 ```
-experiments/
-├── slurm_jobs/           # SLURM scripts organized by dataset
-│   ├── dynerf/          # DyNeRF experiments
-│   └── hypernerf/       # HyperNeRF experiments
-└── slurm_logs/          # Logs organized by dataset
-    ├── dynerf/
-    └── hypernerf/
+experiments/slurm_logs/
+├── archive/                      # 🗄️ Old logs archived here
+│   ├── dynerf/                  # Previous unorganized logs
+│   └── hypernerf/
+├── dynerf/                      # 🎯 DyNeRF experiments organized by config
+│   ├── cut_roasted_beef-gdim8-tdim256/
+│   │   ├── 20250617_163829_12829.out        # Job output with ID
+│   │   ├── 20250617_163829_12829.err        # Job errors with ID  
+│   │   ├── 20250617_163829_12829.progress   # Progress tracking
+│   │   └── 20250617_163829_12829.monitor    # Memory monitoring
+│   ├── cut_roasted_beef-gdim32-tdim256-xavier/
+│   │   └── 20250617_163838_12830.*
+│   └── cut_roasted_beef-gdim64-tdim256-normal/
+│       └── 20250617_163904_12832.*
+└── hypernerf/                   # 🎯 HyperNeRF experiments organized by config
+    ├── vrig-chicken-gdim32-tdim256/
+    └── vrig-chicken-gdim64-tdim512-fourier2.0/
 ```
 
-**Smart Naming (Only Non-Default Parameters):**
+### Enhanced Crash Detection
+
+**Memory Issue Detection:**
+```bash
+=== JOB TERMINATED ===
+Signal: SIGTERM
+Time: 2025-06-17 16:30:45
+Job ID: 12895
+Likely cause: Memory limit exceeded (OOM)
+=== SYSTEM INFO ===
+GPU Memory: 15.2GB / 16GB (94% used)
+System Memory: 63.2GB / 64GB (95% used)
+==================
 ```
-dynerf_cut_roasted_beef_20250616_021146.sh                    # Default parameters
-dynerf_cut_roasted_beef_gdim64_20250616_021146.sh            # Custom Gaussian dim
-dynerf_cut_roasted_beef_fourier2_20250616_021146.sh          # Fourier features
-hypernerf_vrig-chicken_gdim16_fourier4_20250616_021146.sh    # Full custom
-```
+
+**Real-time Memory Monitoring:**
+- GPU memory usage logged every 30 seconds
+- Helps identify memory growth patterns
+- Stored in `*.monitor` files with job ID
+
+### Memory Management
+
+**Automatic Memory Estimation:**
+- **DyNeRF scenes**: Base 8GB + embedding scaling
+- **HyperNeRF scenes**: Base 8GB + 1.5x embedding scaling  
+- **Safety margin**: 30% additional allocation
+- **Example**: gdim=32, tdim=256 → ~23GB estimated
+
+**SLURM Integration:**
+- Automatic `#SBATCH --mem=XG` allocation
+- Prevents OOM crashes from insufficient memory requests
+- Override with `--slurm_mem` if needed
 
 ## 🗂️ Project Structure
 
