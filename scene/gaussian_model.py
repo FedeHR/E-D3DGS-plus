@@ -21,7 +21,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
-
+from scene.fourier_mapper import SimpleFourierMapper
 
 class GaussianModel:
 
@@ -48,10 +48,37 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
 
         self._xyz = torch.empty(0)
+        
+        # FOURIER EMBEDDING
+        # Initialize Fourier mapping for embeddings if enabled
+        self.gaussian_embedding_dim = args.gaussian_embedding_dim
+        self.use_fourier_embedding = getattr(args, 'use_fourier_embedding', False)
+        if self.use_fourier_embedding:
+            fourier_frequencies = getattr(args, 'fourier_frequencies', 4)
+            fourier_scale = getattr(args, 'fourier_scale', 1.0)
+            self.fourier_mapping = SimpleFourierMapper(
+                input_dim=self.gaussian_embedding_dim,
+                num_frequencies=fourier_frequencies,
+                scale=fourier_scale
+            )
+            # Update the effective embedding dimension for the deformation network
+            effective_embedding_dim = self.fourier_mapping.output_dim
+        else:
+            self.fourier_mapping = None
+            effective_embedding_dim = self.gaussian_embedding_dim
+        
+        # Create a modified args object with the effective embedding dimension
+        modified_args = type(args)()
+        for attr in dir(args):
+            if not attr.startswith('_'):
+                setattr(modified_args, attr, getattr(args, attr))
+        modified_args.gaussian_embedding_dim = effective_embedding_dim
+        #########################################################
+        
         self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
                                            min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
                                            num_frames=args.total_num_frames,
-                                           args=args)
+                                           args=modified_args)  #=args
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
@@ -134,6 +161,9 @@ class GaussianModel:
     
     @property
     def get_embedding(self):
+        # FOURIER EMBEDDING
+        if self.use_fourier_embedding and self.fourier_mapping is not None:
+            return self.fourier_mapping(self._embedding)
         return self._embedding
     
     def get_covariance(self, scaling_modifier = 1):
@@ -161,10 +191,16 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-        embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
+        # Comment out for FOURIER EMBEDDING
+        # embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
+        # FOURIER EMBEDDING§
+        embedding = torch.zeros((fused_color.shape[0], self.gaussian_embedding_dim)).float().cuda()  # [jm]
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 
+        # FOURIER EMBEDDING
+        if self.fourier_mapping is not None:
+            self.fourier_mapping = self.fourier_mapping.to("cuda")
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
@@ -222,7 +258,8 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
-        for i in range(self._embedding.shape[1]):
+        # for i in range(self._embedding.shape[1]):
+        for i in range(self.gaussian_embedding_dim):
             l.append('embedding_{}'.format(i))
         return l
 
@@ -231,6 +268,9 @@ class GaussianModel:
         weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
         self._deformation.load_state_dict(weight_dict)
         self._deformation = self._deformation.to("cuda")
+        # FOURIER EMBEDDING
+        if self.fourier_mapping is not None:
+            self.fourier_mapping = self.fourier_mapping.to("cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def save_deformation(self, path):
@@ -301,9 +341,29 @@ class GaussianModel:
 
         embedding_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("embedding")]
         embedding_names = sorted(embedding_names, key = lambda x: int(x.split('_')[-1]))
-        embeddings = np.zeros((xyz.shape[0], len(embedding_names)))
-        for idx, attr_name in enumerate(embedding_names):
-            embeddings[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        # Comment out for FOURIER EMBEDDING
+        # embeddings = np.zeros((xyz.shape[0], len(embedding_names)))
+        # for idx, attr_name in enumerate(embedding_names):
+        #     embeddings[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        #########################################################
+        # Handle both raw and Fourier-mapped embeddings
+        num_embedding_features = len(embedding_names)
+        if self.use_fourier_embedding and self.fourier_mapping and num_embedding_features == self.fourier_mapping.output_dim:
+            print("Loading Fourier-mapped embeddings and projecting to raw embeddings.")
+            # This is complex, as it requires inverting the Fourier mapping.
+            # For now, we'll just initialize new raw embeddings.
+            # A proper implementation might need to store raw embeddings or use a learnable projection.
+            print("Warning: Loading pre-computed Fourier embeddings is not fully supported. Reinitializing embeddings.")
+            embeddings = np.zeros((xyz.shape[0], self.gaussian_embedding_dim))
+        elif num_embedding_features != self.gaussian_embedding_dim:
+            print(f"Warning: Embedding dimension mismatch. Expected {self.gaussian_embedding_dim}, found {num_embedding_features}. Reinitializing embeddings.")
+            embeddings = np.zeros((xyz.shape[0], self.gaussian_embedding_dim))
+        else:
+            embeddings = np.zeros((xyz.shape[0], self.gaussian_embedding_dim))
+            for idx, attr_name in enumerate(embedding_names):
+                embeddings[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        #########################################################
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))

@@ -94,6 +94,12 @@ class ModelHiddenParams(ParamGroup):
         self.deform_from_iter=0
         self.use_anneal=True
         self.zero_temporal=False
+        
+        # Fourier mapping parameters
+        self.use_fourier_embedding=False
+        self.fourier_frequencies=4
+        self.fourier_scale=1.0
+        
         super().__init__(parser, "ModelHiddenParams")
         
 class OptimizationParams(ParamGroup):
