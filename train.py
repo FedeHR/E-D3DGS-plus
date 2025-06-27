@@ -370,9 +370,9 @@ def evaluate(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
         },
         {
             'name': 'train',
-            # Reduced cameras from 150 to 20 cameras to save memory
-            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(20, len(scene.getTrainCameras())), 5)], 
-            'cam_idx': min(3, len(scene.getTrainCameras()) - 1) if len(scene.getTrainCameras()) > 0 else 0
+            # Reduced cameras from 150 to 30 cameras to save memory
+            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(30, len(scene.getTrainCameras())), 5)], 
+            'cam_idx': min(10, len(scene.getTrainCameras()) - 1) if len(scene.getTrainCameras()) > 0 else 0
         }
     ]
     
