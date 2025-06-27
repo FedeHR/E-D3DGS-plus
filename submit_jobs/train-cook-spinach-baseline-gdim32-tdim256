@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH --job-name=cook-spinach-baseline-gdim32
+#SBATCH --partition=NvidiaAll
+#SBATCH --output=slurm_logs/cook-spinach-baseline-gdim32%j.out
+#SBATCH --error=slurm_logs/cook-spinach-baseline-gdim32%j.err
+
+# Proper conda initialization
+eval "$(~/miniforge3/bin/conda shell.bash hook)"
+conda activate ed3dgs
+
+python train.py -s data/cook_spinach --configs arguments/dynerf/cook-spinach-gdim32.py --model_path output/dynerf/cook-spinach-baseline-gdim32 --expname dynerf/cook-spinach-baseline-gdim32 -r 2
+
+echo "Job completed" 
