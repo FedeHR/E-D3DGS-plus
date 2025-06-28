@@ -1,40 +1,42 @@
 import torch
 import torch.nn as nn
-import numpy as np
 
 
 class SimpleFourierMapper(nn.Module):
     """
-    Simple Fourier Feature Mapping for low-dimensional inputs.
+    Simple Fourier Feature Mapping for xyz coordinates.
     
-    Maps input x of dimension D to:
-    TODO: check... here, as in the implementation code, we have an a coefficient for amplitudes. I believe this was not explicitly mentioned 
-    in the paper...
+    Enhances Gaussian embeddings with spatial high-frequency features.
+    Maps input xyz coordinates to Fourier features that are concatenated
+    with learned Gaussian embeddings, preserving the original architecture
+    that uses only embeddings (not raw coordinates) as network input.
+    
     γ(x) = [a * sin(2π B x), a * cos(2π B x)] / ||a||
     
-    where B is a matrix of random frequencies and a are optional learnable amplitude coefficients.
+    where B is a matrix of random frequencies sampled from N(0,1) and a are learnable 
+    amplitude coefficients that control the magnitude of different frequencies.
     Based on "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"
     """
     
-    def __init__(self, input_dim, num_frequencies=4, scale=1.0, use_amplitude_coefficients=True):
+    def __init__(self, input_dim, num_frequencies=4, use_amplitude_coefficients=True):
         """
         Initialize Fourier mapper.
         
         Args:
             input_dim (int): Dimension of input (e.g., 3 for xyz coordinates)
             num_frequencies (int): Number of frequency components
-            scale (float): Scale factor for random frequencies
             use_amplitude_coefficients (bool): Whether to use learnable amplitude coefficients
         """
         super().__init__()
         
         self.input_dim = input_dim
         self.num_frequencies = num_frequencies
-        self.scale = scale
         self.use_amplitude_coefficients = use_amplitude_coefficients
         
         # Generate random frequency matrix B (fixed, not learnable)
-        B = torch.randn(num_frequencies, input_dim) * scale
+        # As randnd samples from Gaussian(0,1), it follows the isotropic Gaussian recommended in the paper for no stron priors
+        # TODO: could learn a better value for sigma or try the other variants in the paper
+        B = torch.randn(num_frequencies, input_dim)
         self.register_buffer('B', B)
         
         # Learnable amplitude coefficients a (optional)

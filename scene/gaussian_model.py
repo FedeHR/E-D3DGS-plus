@@ -21,6 +21,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
+from scene.fourier_mapper import SimpleFourierMapper
 
 
 class GaussianModel:
@@ -48,6 +49,26 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
 
         self._xyz = torch.empty(0)
+        
+        # Initialize Fourier mapping for embedding initialization if enabled
+        self.use_fourier_embedding_init = getattr(args, 'use_fourier_embedding_init', False)
+        if self.use_fourier_embedding_init:
+            fourier_frequencies = getattr(args, 'fourier_frequencies')
+            use_amplitude_coefficients = getattr(args, 'use_amplitude_coefficients', True)
+            
+            self.fourier_mapper = SimpleFourierMapper(
+                input_dim=3,  # xyz coordinates
+                num_frequencies=fourier_frequencies,
+                use_amplitude_coefficients=use_amplitude_coefficients
+            )
+            
+            # When using Fourier initialization, embedding dimension equals Fourier output dimension
+            self.embedding_dim = self.fourier_mapper.output_dim
+        else:
+            self.fourier_mapper = None
+            # Use default embedding dimension from args
+            self.embedding_dim = getattr(args, 'gaussian_embedding_dim', 32)
+        
         self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
                                            min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
                                            num_frames=args.total_num_frames,
@@ -161,7 +182,17 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-        embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
+        
+        # Initialize embeddings with Fourier features if enabled, otherwise use zeros
+        if self.use_fourier_embedding_init:
+            # Move Fourier mapper to CUDA first
+            self.fourier_mapper = self.fourier_mapper.to("cuda")
+            # Initialize embeddings with Fourier-mapped xyz coordinates
+            with torch.no_grad():
+                embedding = self.fourier_mapper(fused_point_cloud).float()
+            print(f"Initialized embeddings with Fourier features: {embedding.shape}")
+        else:
+            embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 
@@ -189,6 +220,12 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
             {'params': [self._embedding], 'lr': training_args.feature_lr, "name": "embedding"}
         ]
+        
+        # Add Fourier mapper parameters if using learnable amplitude coefficients
+        if self.use_fourier_embedding_init and self.fourier_mapper.use_amplitude_coefficients:
+            fourier_lr = getattr(training_args, 'fourier_lr', training_args.feature_lr)
+            l.append({'params': list(self.fourier_mapper.parameters()), 'lr': fourier_lr, "name": "fourier"})
+        
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -231,6 +268,8 @@ class GaussianModel:
         weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
         self._deformation.load_state_dict(weight_dict)
         self._deformation = self._deformation.to("cuda")
+        if self.fourier_mapper is not None:
+            self.fourier_mapper = self.fourier_mapper.to("cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def save_deformation(self, path):
@@ -334,6 +373,9 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if len(group["params"]) > 1 or group["name"] == "offsets":
                 continue
+            # Skip parameter groups that don't correspond to per-point parameters (e.g., fourier parameters)
+            if group["name"] == "fourier":
+                continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -368,6 +410,8 @@ class GaussianModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if len(group["params"])>1 or group["name"] == "offsets":continue
+            # Skip parameter groups that don't have corresponding tensors (e.g., fourier parameters)
+            if group["name"] not in tensors_dict:continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)

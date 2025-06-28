@@ -23,8 +23,18 @@ class deform_network(nn.Module):
         self.max_embeddings = max_embeddings
         self.num_frames = num_frames
         self.temporal_embedding_dim = args.temporal_embedding_dim
-        self.gaussian_embedding_dim = args.gaussian_embedding_dim
+        
+        # Determine Gaussian embedding dimension based on Fourier initialization
+        if getattr(args, 'use_fourier_embedding_init', False):
+            fourier_frequencies = getattr(args, 'fourier_frequencies')
+            self.gaussian_embedding_dim = 2 * fourier_frequencies  # Fourier output dimension
+        else:
+            self.gaussian_embedding_dim = args.gaussian_embedding_dim
+            
         self.c2f_temporal_iter = args.c2f_temporal_iter
+        
+        # Calculate input dimension for the MLP: temporal + gaussian embeddings
+        self.input_dim = self.temporal_embedding_dim + self.gaussian_embedding_dim
 
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
         self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net()
@@ -36,7 +46,7 @@ class deform_network(nn.Module):
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
     def create_net(self):
-        self.feature_out = [nn.Linear(self.temporal_embedding_dim + self.gaussian_embedding_dim, self.W)]
+        self.feature_out = [nn.Linear(self.input_dim, self.W)]
         
         for i in range(self.D-1):
             self.feature_out.append(nn.ReLU())
@@ -79,6 +89,7 @@ class deform_network(nn.Module):
             else:
                 h = self.get_temporal_embed(t, self.int_lininterp(iter, num_down_emb, self.max_embeddings, self.c2f_temporal_iter))
     
+        # Get Gaussian embeddings (now potentially initialized with Fourier features)
         if type(pc) == type(None):
             h = torch.cat([h, embeddings], dim=-1)
         else:        
