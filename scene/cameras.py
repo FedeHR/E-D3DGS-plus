@@ -124,14 +124,101 @@ class Camera(nn.Module):
             self.rayd = None
             
     def load_image(self):
-        original_image = Image.open(self.image_path)
-        original_image = original_image.resize(self.img_wh, Image.LANCZOS)
-        self.original_image = self.transform(original_image)
-        self.image_width = self.original_image.shape[2]
-        self.image_height = self.original_image.shape[1]
-        if self.gt_alpha_mask is not None:
-            self.original_image *= self.gt_alpha_mask.to(self.data_device)
-    
+        """Load image with corruption detection and recovery."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Try to open and verify the image
+                original_image = Image.open(self.image_path)
+                original_image.verify()  # Check for corruption
+                
+                # Re-open the image for actual use (verify() closes it)
+                original_image = Image.open(self.image_path)
+                original_image = original_image.resize(self.img_wh, Image.LANCZOS)
+                self.original_image = self.transform(original_image)
+                self.image_width = self.original_image.shape[2]
+                self.image_height = self.original_image.shape[1]
+                if self.gt_alpha_mask is not None:
+                    self.original_image *= self.gt_alpha_mask.to(self.data_device)
+                return  # Success, exit the function
+                
+            except (OSError, IOError, Image.UnidentifiedImageError) as e:
+                print(f"⚠️  Image loading failed (attempt {attempt+1}/{max_retries}): {self.image_path}")
+                print(f"    Error: {e}")
+                
+                if attempt < max_retries - 1:
+                    print(f"    Retrying in 1 second...")
+                    import time
+                    time.sleep(1)
+                else:
+                    # Final attempt failed - try to find a replacement image
+                    print(f"❌ All attempts failed for {self.image_path}")
+                    print(f"    Looking for replacement image...")
+                    
+                    # Try to find a nearby frame
+                    replacement_path = self._find_replacement_image()
+                    if replacement_path:
+                        print(f"    Using replacement: {replacement_path}")
+                        original_image = Image.open(replacement_path)
+                        original_image = original_image.resize(self.img_wh, Image.LANCZOS)
+                        self.original_image = self.transform(original_image)
+                        self.image_width = self.original_image.shape[2]
+                        self.image_height = self.original_image.shape[1]
+                        if self.gt_alpha_mask is not None:
+                            self.original_image *= self.gt_alpha_mask.to(self.data_device)
+                        return
+                    else:
+                        # No replacement found - create a black image as last resort
+                        print(f"    No replacement found, using black image")
+                        original_image = Image.new('RGB', self.img_wh, color='black')
+                        self.original_image = self.transform(original_image)
+                        self.image_width = self.original_image.shape[2]
+                        self.image_height = self.original_image.shape[1]
+                        if self.gt_alpha_mask is not None:
+                            self.original_image *= self.gt_alpha_mask.to(self.data_device)
+                        return
+
+    def _find_replacement_image(self):
+        """Find a nearby frame to replace a corrupted image."""
+        import os
+        import glob
+        from pathlib import Path
+        
+        path_obj = Path(self.image_path)
+        parent_dir = path_obj.parent
+        filename = path_obj.stem
+        extension = path_obj.suffix
+        
+        # Try to extract frame number
+        try:
+            frame_num = int(''.join(filter(str.isdigit, filename)))
+            
+            # Look for nearby frames (±5 frames)
+            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+                candidate_num = frame_num + offset
+                if candidate_num >= 0:  # Don't go negative
+                    candidate_path = parent_dir / f"{candidate_num:04d}{extension}"
+                    if candidate_path.exists():
+                        try:
+                            # Test if the candidate image is valid
+                            test_img = Image.open(candidate_path)
+                            test_img.verify()
+                            return str(candidate_path)
+                        except:
+                            continue
+        except ValueError:
+            # If we can't extract frame number, look for any valid image in the same directory
+            for img_path in glob.glob(str(parent_dir / f"*{extension}")):
+                if img_path != self.image_path:
+                    try:
+                        test_img = Image.open(img_path)
+                        test_img.verify()
+                        return img_path
+                    except:
+                        continue
+        
+        return None
+
     def set_image(self):
         self.image_width = self.img_wh[0]
         self.image_height = self.img_wh[1]

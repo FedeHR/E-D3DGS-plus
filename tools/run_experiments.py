@@ -108,9 +108,8 @@ class ExperimentRunner:
         else:
             raise ValueError(f"Unknown dataset: {dataset}")
         
-        # Use Fourier training script if Fourier features are enabled
-        if config["model_params"]["use_fourier_features"]:
-            base_script = "train_fourier.py"
+        # Note: Fourier features are now integrated into train.py
+        # No need for separate script - use embedding_init parameter instead
         
         slurm_script = f"""#!/bin/bash
 #SBATCH --job-name={config_name.replace('/', '_')}

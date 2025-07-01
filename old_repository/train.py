@@ -8,10 +8,6 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-# FOURIER FEATURES: Modified version of train.py with Fourier feature initialization
-# Based on "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"
-# https://proceedings.neurips.cc/paper/2020/file/55053683268957697aa39fba6f231c68-Paper.pdf
-
 import math
 import numpy as np
 import random
@@ -307,12 +303,10 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     tb_writer = prepare_output_and_logger(expname)
     
     # Initialize wandb for logging with some relevant parameters
-    wandb.init(project="E-D3DGS-Fourier", name=expname, config={
+    wandb.init(project="E-D3DGS", name=expname, config={
         "dataset": str(dataset),
         "iterations": opt.iterations,
         "learning_rate": opt.position_lr_init,
-        "use_fourier_features": dataset.use_fourier_features,
-        "fourier_scale": dataset.fourier_scale,
     })
     
     gaussians = GaussianModel(dataset.sh_degree, hyper)
@@ -469,7 +463,7 @@ if __name__ == "__main__":
     # Set up command line argument parser
     # torch.set_default_tensor_type('torch.FloatTensor')
     torch.cuda.empty_cache()
-    parser = ArgumentParser(description="Training script parameters with Fourier Features")
+    parser = ArgumentParser(description="Training script parameters")
     setup_seed(6666)
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
@@ -487,27 +481,14 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     
-    # FOURIER FEATURES: Add command line arguments for Fourier features
-    parser.add_argument("--use_fourier_features", action="store_true", 
-                       help="Use Fourier feature initialization for Gaussian embeddings")
-    parser.add_argument("--fourier_scale", type=float, default=1.0,
-                       help="Scale parameter for Fourier feature frequency sampling (default: 1.0)")
-    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
-    
-    # FOURIER FEATURES: Set the Fourier feature parameters in dataset args
-    lp.use_fourier_features = args.use_fourier_features
-    lp.fourier_scale = args.fourier_scale
-    
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
-    
     print("Optimizing " + args.model_path)
-    print(f"FOURIER FEATURES: Enabled={args.use_fourier_features}, Scale={args.fourier_scale}")
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
@@ -518,4 +499,4 @@ if __name__ == "__main__":
     training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
 
     # All done
-    print("\nTraining complete.") 
+    print("\nTraining complete.")

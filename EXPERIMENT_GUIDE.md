@@ -75,13 +75,7 @@ source bin/setup_wandb_team.sh
 ./bin/run_experiment.sh --scene cut_roasted_beef --dry_run
 ```
 
-### Batch Experiments
-```bash
-# Run predefined experiment sets
-./bin/run_batch_experiments.sh experiments/configs/default_batch.conf
-./bin/run_batch_experiments.sh experiments/configs/fourier_comparison.conf
-./bin/run_batch_experiments.sh experiments/configs/embedding_dimensions.conf
-```
+
 
 ### Experiment Parameters
 
@@ -91,13 +85,260 @@ source bin/setup_wandb_team.sh
 | `--gdim` | 32 | Gaussian embedding dimension | Model capacity and spatial detail |
 | `--tdim` | 256 | Temporal embedding dimension | Temporal modeling capability |
 | `--fourier_scale` | 0 | Fourier features scale (0=disabled) | Spatial frequency enhancement |
-| `--embedding_init` | random | Embedding initialization (random/zero/xavier) | Training convergence |
+| `--embedding_init` | zero | Gaussian embedding initialization (see methods below) | Training convergence & spatial detail |
+| `--temporal_embedding_init` | normal | Temporal embedding initialization | Temporal modeling stability |
+| `--num_freq_bands` | auto | Frequency bands for structured Fourier | Frequency coverage range |
 | `--gpu` | 0 | GPU device ID | Hardware selection |
 | `--resolution` | 2 | Resolution scaling factor | Training speed vs quality |
 
 **Auto-detected Datasets:**
 - **DyNeRF**: coffee_martini, cook_spinach, cut_roasted_beef, flame_salmon_1, flame_steak, sear_steak
 - **HyperNeRF**: aleks-teapot, chickchicken, cut-lemon, hand, slice-banana, torchocolate, americano, cross-hands, espresso, keyboard, oven-mitts, split-cookie, tamping, 3dprinter, broom, vrig-chicken, peel-banana
+
+## 🧬 Comprehensive Embedding Initialization Methods
+
+Based on **"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"** (Tancik et al., NeurIPS 2020) and classical deep learning initialization strategies:
+
+### 🎯 Classical Methods
+- **`zero`** (default): Zero initialization - stable baseline, good for ablations
+- **`normal`**: Standard normal distribution N(0,0.01²) - basic random initialization  
+- **`random`**: Alias for normal initialization
+- **`uniform`**: Uniform distribution U(-0.01,0.01) - bounded random initialization
+
+### ⚖️ Xavier/Glorot Family (Better Gradient Flow)
+- **`xavier`**: Xavier normal initialization - recommended for linear/tanh activations
+- **`xavier_normal`**: Same as xavier (explicit naming)
+- **`xavier_uniform`**: Xavier uniform variant - sometimes more stable
+
+### 🎢 Kaiming/He Family (ReLU Networks)
+- **`kaiming`**: Kaiming normal initialization - optimal for ReLU networks
+- **`kaiming_normal`**: Same as kaiming (explicit naming) 
+- **`he_normal`**: Same as kaiming_normal (alternative naming)
+- **`he_uniform`**: He uniform variant - for ReLU activations
+
+### 🌊 Fourier & Positional Encoding Methods (High-Frequency Spatial Details)
+
+These methods enable neural networks to learn high-frequency functions by mapping coordinates to higher-dimensional feature spaces. Based on **"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"** (Tancik et al., NeurIPS 2020).
+
+#### 🎯 Random Fourier Features (`fourier`, `positional`)
+**What it does**: Maps 3D coordinates (x,y,z) through random frequency projections
+**Formula**: `γ(p) = [cos(2πB₁·p), sin(2πB₁·p), ..., cos(2πBₘ·p), sin(2πBₘ·p)]`
+
+**Parameters:**
+- `--fourier_scale`: Controls frequency range [0, scale] (higher = more detail)
+- No `--num_freq_bands` needed (auto-calculated from dimension)
+
+**Dimension mapping:**
+- **16D**: 8 random frequency vectors → broad frequency coverage
+- **32D**: 16 random frequency vectors → denser frequency sampling  
+- **64D**: 32 random frequency vectors → very dense sampling
+
+**Best for**: General scenes where you want better spatial detail than normal embeddings
+
+#### 🏗️ Structured Fourier / NeRF Positional Encoding (`structured_fourier`, `positional_encoding`)
+**What it does**: Uses deterministic powers-of-2 frequencies like NeRF
+**Formula**: `γ(p) = [p, sin(2⁰πp), cos(2⁰πp), sin(2¹πp), cos(2¹πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp)]`
+
+**Parameters:**
+- `--fourier_scale`: Base frequency (default: 1.0)
+- `--num_freq_bands`: Number of frequency bands (auto-calculated if not specified)
+
+**Dimension mapping & frequency ranges:**
+- **16D**: ~2 freq bands → [scale, 2×scale] (e.g., [1.0, 2.0])
+- **32D**: ~5 freq bands → [scale, 16×scale] (e.g., [1.0, 16.0])
+- **64D**: ~10 freq bands → [scale, 512×scale] (e.g., [1.0, 512.0])
+
+**Best for**: Scenes with predictable frequency content, systematic ablations
+
+#### 🧠 Learned Fourier Features (`learned_fourier`)
+**What it does**: Initializes with structured random frequencies but allows learning
+**Features**: Multi-scale initialization (1/3 low, 1/3 medium, 1/3 high frequencies)
+
+**Parameters:**
+- `--fourier_scale`: Controls initial frequency distribution
+- No `--num_freq_bands` needed
+
+**Best for**: Complex scenes where optimal frequencies are unknown
+
+### 🕒 Temporal-Specific Methods
+- **`sinusoidal`**: Transformer-style positional encoding for time (temporal embeddings only)
+
+### 📊 **CRITICAL: Fourier vs Normal Embedding Dimension Trade-offs**
+
+This is key for understanding how to choose parameters:
+
+#### 🔍 **Frequency Coverage vs Embedding Dimension**
+
+**Random Fourier (`fourier`) vs Normal Embeddings:**
+```bash
+# These provide roughly equivalent model capacity:
+--embedding_init fourier --fourier_scale 2.0 --gdim 16  # 8 freq mappings
+--embedding_init xavier --gdim 16                        # 16 normal dimensions
+
+# But Fourier has better high-frequency representation!
+```
+
+**Structured Fourier (`structured_fourier`) vs Normal:**
+```bash
+# Low-frequency focused (good for smooth scenes):
+--embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 3 --gdim 32
+# Covers frequencies [1.0, 2.0, 4.0] = 3×6+3 = 21 effective dims
+
+# High-frequency focused (good for detailed scenes):  
+--embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 8 --gdim 64
+# Covers frequencies [1.0, 2.0, 4.0, ..., 128.0] = 8×6+3 = 51 effective dims
+
+# Equivalent normal embedding:
+--embedding_init xavier --gdim 64  # 64 normal dimensions (less structured)
+```
+
+#### ⚖️ **How to Choose: Fourier Bands vs Higher Dimensions**
+
+**For the SAME computational cost, you can choose:**
+
+**Option A: More Fourier Frequency Bands (Structured)**
+```bash
+--embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 10 --gdim 64
+```
+- **Pros**: Explicit frequency control, interpretable, good for known detail levels
+- **Cons**: Fixed frequency structure, may miss optimal frequencies
+
+**Option B: Higher Normal Embedding Dimension**
+```bash
+--embedding_init xavier --gdim 64
+```
+- **Pros**: Maximum flexibility, can learn any frequency, adaptive
+- **Cons**: Less interpretable, may struggle with high frequencies initially
+
+**Option C: Random Fourier with Higher Scale**
+```bash
+--embedding_init fourier --fourier_scale 4.0 --gdim 64
+```
+- **Pros**: Random frequency sampling, good high-freq initialization, flexible
+- **Cons**: Non-deterministic, less controlled than structured
+
+#### 🎯 **Practical Decision Guidelines**
+
+**Use Higher `num_freq_bands` when:**
+- You know the scene has specific detail scales
+- You want interpretable frequency control
+- You're doing systematic frequency ablations
+- Scene has obvious geometric detail levels
+
+**Use Higher `gdim` (normal embeddings) when:**
+- Scene complexity is unknown
+- You want maximum model flexibility  
+- You prefer simple, well-tested initialization
+- Computational cost is not a constraint
+
+**Use Random Fourier (`fourier`) when:**
+- You want better high-frequency capability than normal
+- You want some frequency benefits without manual tuning
+- You're prototyping or want good general performance
+
+#### 📐 **Memory & Speed Considerations**
+
+All methods have the same computational cost for the same `gdim`, but:
+- **Fourier methods**: Better gradient flow for high-frequency details
+- **Normal embeddings**: Slightly faster initialization
+- **Structured Fourier**: Most interpretable results
+
+### 🔬 Recommended Configurations & Comparisons
+
+#### 🎯 **High-Detail Scenes** (cook_spinach, cut_roasted_beef, flame_salmon)
+```bash
+# Option A: Random Fourier (balanced performance)
+--embedding_init fourier --fourier_scale 2.0 --gdim 32
+
+# Option B: Structured Fourier (interpretable frequencies)  
+--embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 8 --gdim 64
+
+# Option C: High-dimension normal (maximum flexibility)
+--embedding_init xavier --gdim 64
+```
+
+#### ⚡ **Fast Prototyping & Development**
+```bash
+# Minimal setup (fastest training)
+--embedding_init xavier --gdim 16 --tdim 128
+
+# Balanced setup (good quality/speed)
+--embedding_init kaiming --gdim 32 --tdim 256
+
+# Quick Fourier test (better detail than normal)
+--embedding_init fourier --fourier_scale 1.0 --gdim 32
+```
+
+#### 🕒 **Temporal Stability & Motion Modeling**
+```bash
+# Smooth temporal transitions
+--temporal_embedding_init sinusoidal --tdim 256
+
+# Better gradient flow for temporal features
+--temporal_embedding_init xavier --tdim 512
+
+# Large temporal capacity for complex motion
+--temporal_embedding_init xavier --tdim 1024
+```
+
+#### 🔬 **Scientific Experiments & Ablations**
+
+**Initialization Method Comparison:**
+```bash
+# Baseline (standard approach)
+--embedding_init zero --gdim 32
+
+# Better gradient flow
+--embedding_init xavier --gdim 32   
+
+# High-frequency capability
+--embedding_init fourier --fourier_scale 2.0 --gdim 32
+
+# Structured frequency analysis
+--embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 5 --gdim 32
+```
+
+**Frequency Band Analysis (structured_fourier):**
+```bash
+# Low frequency focus (smooth scenes)
+--embedding_init structured_fourier --num_freq_bands 3 --gdim 32
+
+# Medium frequency focus (balanced)
+--embedding_init structured_fourier --num_freq_bands 6 --gdim 32  
+
+# High frequency focus (detailed scenes)
+--embedding_init structured_fourier --num_freq_bands 10 --gdim 64
+```
+
+**Equivalent Capacity Comparisons:**
+```bash
+# ~16 effective dimensions - test which works better:
+--embedding_init xavier --gdim 16                         # Normal baseline
+--embedding_init fourier --fourier_scale 1.0 --gdim 16   # Random Fourier
+--embedding_init structured_fourier --num_freq_bands 2 --gdim 16  # Structured
+
+# ~32 effective dimensions:  
+--embedding_init xavier --gdim 32                         # Normal baseline
+--embedding_init fourier --fourier_scale 2.0 --gdim 32   # Random Fourier
+--embedding_init structured_fourier --num_freq_bands 5 --gdim 32  # Structured
+```
+
+#### 🎮 **Quick Scene-Specific Recommendations**
+
+**Smooth Scenes** (vrig-chicken, hand):
+```bash
+--embedding_init xavier --gdim 32 --temporal_embedding_init sinusoidal
+```
+
+**Detailed/Textured Scenes** (cook_spinach, cut_roasted_beef):
+```bash
+--embedding_init fourier --fourier_scale 2.0 --gdim 64
+```
+
+**Fast-Moving Scenes** (flame_salmon, sear_steak):
+```bash
+--embedding_init structured_fourier --num_freq_bands 8 --gdim 64 --temporal_embedding_init xavier --tdim 512
+```
 
 ## 📊 Enhanced Wandb Tracking & Metrics
 
@@ -238,26 +479,33 @@ Examples:
 
 ### Organized Log Structure
 
-**Organized Structure Within Dataset Folders:**
+**📅 Chronologically Organized Structure:**
 ```
 experiments/slurm_logs/
-├── archive/                      # 🗄️ Old logs archived here
-│   ├── dynerf/                  # Previous unorganized logs
-│   └── hypernerf/
-├── dynerf/                      # 🎯 DyNeRF experiments organized by config
-│   ├── cut_roasted_beef-gdim8-tdim256/
-│   │   ├── 20250617_163829_12829.out        # Job output with ID
-│   │   ├── 20250617_163829_12829.err        # Job errors with ID  
-│   │   ├── 20250617_163829_12829.progress   # Progress tracking
-│   │   └── 20250617_163829_12829.monitor    # Memory monitoring
-│   ├── cut_roasted_beef-gdim32-tdim256-xavier/
-│   │   └── 20250617_163838_12830.*
-│   └── cut_roasted_beef-gdim64-tdim256-normal/
-│       └── 20250617_163904_12832.*
-└── hypernerf/                   # 🎯 HyperNeRF experiments organized by config
-    ├── vrig-chicken-gdim32-tdim256/
-    └── vrig-chicken-gdim64-tdim512-fourier2.0/
+├── dynerf/                      # 🎯 DyNeRF experiments (chronologically sorted)
+│   ├── 20250618_150350_cut_roasted_beef-gdim32-tdim256-structured_fourier4/
+│   │   ├── 20250618_150350_12345.out        # Job output with timestamp_jobID
+│   │   ├── 20250618_150350_12345.err        # Job errors with timestamp_jobID
+│   │   ├── 20250618_150350_12345.progress   # Progress tracking
+│   │   └── 20250618_150350_12345.monitor    # Memory monitoring
+│   ├── 20250618_150400_cut_roasted_beef-gdim16-tdim256-xavier-temporalsinusoidal/
+│   │   └── 20250618_150400_12346.*
+│   └── 20250618_150500_cook_spinach-gdim64-tdim512-fourier2.0/
+│       └── 20250618_150500_12347.*
+├── hypernerf/                   # 🎯 HyperNeRF experiments (chronologically sorted)
+│   ├── 20250618_150400_vrig-chicken-gdim64-tdim256-fourier2.0/
+│   │   └── 20250618_150400_12348.*
+│   └── 20250618_150600_hand-gdim32-tdim256-xavier/
+│       └── 20250618_150600_12349.*
+└── archive/                     # 🗄️ Old logs from before timestamp naming
+    ├── dynerf/                  # Previous unorganized logs
+    └── hypernerf/
 ```
+
+**📂 Naming Convention:**
+- **Directory**: `YYYYMMDD_HHMMSS_scene-gdim32-tdim256-method`  
+- **Files**: `YYYYMMDD_HHMMSS_jobID.{out,err,progress,monitor}`
+- **SLURM scripts**: `YYYYMMDD_HHMMSS_dataset_scene_method.sh`
 
 ### Enhanced Crash Detection
 
@@ -298,15 +546,15 @@ System Memory: 63.2GB / 64GB (95% used)
 E-D3DGS-plus/
 ├── bin/                    # 🔧 Main executable scripts
 │   ├── run_experiment.sh   # Single experiment runner
-│   ├── run_batch_experiments.sh # Batch runner
 │   └── setup_wandb_team.sh # Wandb configuration
 ├── tools/                  # 🛠️ Utility scripts
 │   ├── monitor_experiments.sh # Experiment monitoring
 │   └── check_setup.sh      # Setup verification
 ├── experiments/            # 📊 Experiment management
-│   ├── configs/           # Batch experiment configs
 │   ├── slurm_jobs/       # Generated job scripts (by dataset)
 │   └── slurm_logs/       # Job execution logs (by dataset)
+├── utils/                  # 🧬 Core utilities
+│   └── simple_embedding_init.py # Comprehensive embedding initialization
 ├── data/                  # 📂 Datasets
 ├── results/               # 📈 Experiment outputs
 ├── train.py              # Enhanced training script with comprehensive logging
@@ -316,16 +564,24 @@ E-D3DGS-plus/
 
 ## 🔧 Advanced Configuration
 
-### Custom Batch Experiments
+### Custom Experiment Series
 
-Create your own batch configuration:
+Run systematic experiments with shell loops:
 ```bash
-# experiments/configs/my_experiment.conf
-# Each line represents one experiment with its parameters
---scene cut_roasted_beef
---scene cut_roasted_beef --gdim 64
---scene cut_roasted_beef --fourier_scale 2.0
---scene vrig-chicken --gdim 16 --fourier_scale 4.0
+# Test different embedding dimensions
+for gdim in 16 32 64; do
+    ./bin/run_experiment.sh --scene cut_roasted_beef --gdim $gdim
+done
+
+# Test different Fourier scales
+for scale in 1.0 2.0 4.0; do
+    ./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale $scale
+done
+
+# Test frequency bands for structured Fourier
+for bands in 3 6 9; do
+    ./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands $bands --gdim 64
+done
 ```
 
 ### SLURM Configuration
@@ -342,22 +598,21 @@ Create your own batch configuration:
 
 ## 🎯 Research Workflows
 
-### Baseline Comparison
+### Systematic Comparisons
 ```bash
-# Run baseline experiments
-./bin/run_batch_experiments.sh experiments/configs/default_batch.conf
-```
+# Baseline comparison across scenes
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init zero
+./bin/run_experiment.sh --scene vrig-chicken --embedding_init zero
 
-### Fourier Feature Study
-```bash
-# Compare with/without Fourier features
-./bin/run_batch_experiments.sh experiments/configs/fourier_comparison.conf
-```
+# Fourier feature study  
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 1.0
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 2.0
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 4.0
 
-### Embedding Dimension Analysis
-```bash
-# Test different embedding sizes
-./bin/run_batch_experiments.sh experiments/configs/embedding_dimensions.conf
+# Embedding dimension analysis
+./bin/run_experiment.sh --scene cut_roasted_beef --gdim 16
+./bin/run_experiment.sh --scene cut_roasted_beef --gdim 32  
+./bin/run_experiment.sh --scene cut_roasted_beef --gdim 64
 ```
 
 ### Custom Research Question
@@ -366,13 +621,221 @@ Create your own batch configuration:
 ./bin/run_experiment.sh --scene vrig-chicken --gdim 16 --fourier_scale 2.0
 ```
 
+## 🖥️ SLURM Cluster Information & Commands
+
+### 📊 Available Partitions & Nodes
+
+| Partition | Nodes | Time Limit | QoS Required | Best For |
+|-----------|-------|------------|--------------|----------|
+| **NvidiaAll** | 25 NVIDIA GPU nodes | Unlimited | None | Standard GPU training |
+| **Abaki** | 4 high-priority nodes (abakus11-12, 21-22) | 5 days | `abaki` | High-priority jobs |
+| **AMD** | 66 AMD GPU nodes | Unlimited | None | AMD GPU training |
+| **Krater** | 40 CPU nodes | Unlimited | None | CPU-only jobs |
+| **All** | 131 mixed nodes | Unlimited | None | General purpose |
+
+### 🎯 Abakus Partition (High-Priority)
+
+**Key Features:**
+- **4 nodes**: abakus11, abakus12, abakus21, abakus22
+- **Default time limit**: 24 hours (we override to 4 hours)
+- **Max time limit**: 5 days  
+- **QoS required**: `abaki`
+- **Reserved times**: Sunday & Monday 8:00-22:00 for compvis25 group
+- **No memory specification**: Nodes don't support `--mem` parameter
+
+**Reservations (Auto-detected by script):**
+- **Sunday**: `compvis25_So` (8:00-22:00)
+- **Monday**: `compvis25_Mo` (8:00-22:00)
+
+### 🔧 Essential SLURM Commands
+
+#### Job Management
+```bash
+# Submit a job
+sbatch my_script.sh
+
+# Check all your jobs
+squeue -u $USER
+
+# Check specific partition
+squeue -p Abaki
+squeue -p NvidiaAll
+
+# Check all jobs with detailed format
+squeue -o "%.18i %.9P %.8j %.8u %.8T %.10M %.9l %.6D %R"
+
+# Get detailed job information
+scontrol show job JOB_ID
+
+# Cancel a job
+scancel JOB_ID
+
+# Cancel all your jobs
+scancel -u $USER
+```
+
+#### Node Information
+```bash
+# Show all partitions
+scontrol show partition
+
+# Show specific partition details
+scontrol show partition Abaki
+scontrol show partition NvidiaAll
+
+# Show node details
+scontrol show node abakus12
+scontrol show nodes
+
+# Check node availability
+sinfo
+sinfo -p Abaki
+```
+
+#### Queue Analysis
+```bash
+# Show queue with reasons for pending jobs
+squeue -l
+
+# Show only running jobs
+squeue -t RUNNING
+
+# Show only pending jobs  
+squeue -t PENDING
+
+# Show jobs on specific nodes
+squeue -w abakus11,abakus12
+
+# Show reservation information
+scontrol show reservation
+```
+
+#### Job History & Stats
+```bash
+# Show your recent jobs (last 24h)
+sacct -S $(date -d '1 day ago' +%Y-%m-%d) -u $USER
+
+# Show detailed job accounting
+sacct -j JOB_ID --format=JobID,JobName,Partition,Account,AllocCPUS,State,ExitCode,Start,End,Elapsed,MaxRSS
+
+# Show usage by partition
+sreport cluster utilization start=2025-06-01 end=2025-06-30
+```
+
+### 🎯 Best Practices for Abakus
+
+**For 4-Hour Jobs (Recommended):**
+```bash
+# Perfect for quick experiments
+./bin/run_experiment.sh --scene cut_roasted_beef --abakus --gdim 16 --tdim 128
+
+# For detailed scenes, use efficient settings
+./bin/run_experiment.sh --scene vrig-chicken --abakus --gdim 32 --tdim 256
+```
+
+**For Longer Jobs (Use reservations):**
+```bash
+# Use Sunday/Monday reservations for longer runs
+./bin/run_experiment.sh --scene cut_roasted_beef --abakus --reservation compvis25_So
+```
+
+**Resource Guidelines:**
+- **Memory**: Don't specify `--mem` (automatically handled)
+- **Time**: Default 4 hours (perfect for most experiments)
+- **CPUs**: 8 CPUs per node (automatically allocated)
+
+### 📈 Monitoring Your Jobs
+
+**Real-time monitoring:**
+```bash
+# Watch your jobs continuously
+watch -n 5 "squeue -u $USER"
+
+# Monitor specific partition
+watch -n 10 "squeue -p Abaki -o '%.18i %.9P %.8j %.8u %.8T %.10M %.9l %.6D %R'"
+
+# Check job progress
+tail -f experiments/slurm_logs/dynerf/*/20250618_*.out
+```
+
+**Our Enhanced Monitoring:**
+```bash
+# Use our built-in tools
+./tools/monitor_experiments.sh --status
+./tools/monitor_experiments.sh --watch
+./tools/monitor_experiments.sh --logs JOB_ID
+```
+
+**📅 Finding Your Experiments (Chronological Order):**
+```bash
+# List experiments by date (newest first)
+ls -t experiments/slurm_logs/dynerf/
+ls -t experiments/slurm_logs/hypernerf/
+
+# Find today's experiments
+ls experiments/slurm_logs/dynerf/ | grep $(date +%Y%m%d)
+
+# Find experiments with specific method
+ls experiments/slurm_logs/dynerf/ | grep fourier
+ls experiments/slurm_logs/dynerf/ | grep structured_fourier
+
+# Quick view of recent experiment names
+ls -t experiments/slurm_logs/dynerf/ | head -5 | sed 's/^[0-9_]*_//'
+
+# View logs from most recent experiment
+tail -f experiments/slurm_logs/dynerf/$(ls -t experiments/slurm_logs/dynerf/ | head -1)/*.out
+```
+
+### ⚡ Quick Reference Commands
+
+```bash
+# === MOST USEFUL COMMANDS ===
+# Check your current jobs
+squeue -u $USER
+
+# Check Abakus availability  
+squeue -p Abaki
+
+# Submit to Abakus with 4h limit
+./bin/run_experiment.sh --scene SCENE --abakus
+
+# Cancel a hanging job
+scancel JOB_ID
+
+# Check why job is pending
+squeue -u $USER -o "%.18i %.9P %.8j %.8u %.8T %.10M %.9l %.6D %R"
+
+# Show detailed job info
+scontrol show job JOB_ID
+
+# Check node status
+sinfo -p Abaki
+
+# View reservations
+scontrol show reservation | grep compvis25
+
+# === LOG ORGANIZATION ===
+# Organize old logs (run once)
+./tools/organize_old_logs.sh
+
+# View experiments chronologically
+ls -t experiments/slurm_logs/dynerf/
+ls -t experiments/slurm_logs/hypernerf/
+
+# Find today's experiments
+ls experiments/slurm_logs/dynerf/ | grep $(date +%Y%m%d)
+```
+
 ## 🚨 Troubleshooting
 
 ### Common Issues
 
 | Issue | Solution |
 |-------|----------|
-| Job pending | Wait for resources or try `--abakus` for high priority |
+| Job pending on Abakus | Check `squeue -p Abaki` - nodes may be full. Try NvidiaAll or wait |
+| "Memory specification cannot be satisfied" | Fixed for Abakus - update script if needed |
+| "QoS abaki" access denied | You're authorized - check partition spelling |
+| Job killed after 4 hours | Increase time: `--time 8:00:00` or use reservation |
 | Conda environment not found | Run `conda activate ed3dgs` |
 | Wandb not logging | Check `source bin/setup_wandb_team.sh` |
 | Permission denied | Check file permissions with `chmod +x bin/run_experiment.sh` |
@@ -395,8 +858,21 @@ Create your own batch configuration:
 # Basic experiment (original defaults)
 ./bin/run_experiment.sh --scene cut_roasted_beef
 
-# Custom experiment with Fourier features
+# Custom experiment with Fourier features  
 ./bin/run_experiment.sh --scene vrig-chicken --gdim 16 --fourier_scale 2.0
+
+# Scientific comparison: Different initialization methods
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init xavier --gdim 32
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 2.0 --gdim 32
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 5 --gdim 32
+
+# Frequency band ablation study
+./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 3 --gdim 32
+./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 6 --gdim 32
+./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 10 --gdim 64
+
+# Temporal stability experiment
+./bin/run_experiment.sh --scene vrig-chicken --temporal_embedding_init sinusoidal --tdim 512
 
 # Local execution for debugging
 ./bin/run_experiment.sh --scene cut_roasted_beef --no_slurm
@@ -432,4 +908,62 @@ scancel JOB_ID
 - 📈 **Enhanced test evaluation** every 1000 iterations
 - 🎛️ **Complete parameter tracking** for reproducibility
 
-**🎉 Ready to run E-D3DGS experiments with comprehensive tracking!** Start with the Quick Start section and monitor your experiments on Wandb! 🚀 
+## 🎯 **Key Takeaways & Decision Guide**
+
+### 🧠 **The Fundamental Choice: Fourier vs Higher Dimensions**
+
+**When to use Fourier methods:**
+- ✅ Scenes with fine geometric details (textures, edges, complex surfaces)
+- ✅ You want better high-frequency representation from the start
+- ✅ You prefer interpretable frequency control (`structured_fourier`)
+- ✅ You're comparing against NeRF-style methods
+
+**When to use higher normal dimensions:**
+- ✅ Scene complexity is unknown
+- ✅ You want maximum model flexibility
+- ✅ You prefer simple, well-tested approaches
+- ✅ Memory/speed is not a major constraint
+
+### ⚖️ **Equivalent Capacity Quick Reference**
+
+For roughly the same representational power:
+```bash
+# ~16 effective dimensions
+--embedding_init xavier --gdim 16                               # Flexible
+--embedding_init fourier --fourier_scale 1.0 --gdim 16         # Better high-freq
+--embedding_init structured_fourier --num_freq_bands 2 --gdim 16  # Interpretable
+
+# ~32 effective dimensions  
+--embedding_init xavier --gdim 32                               # Flexible
+--embedding_init fourier --fourier_scale 2.0 --gdim 32         # Better high-freq
+--embedding_init structured_fourier --num_freq_bands 5 --gdim 32  # Interpretable
+
+# ~64 effective dimensions
+--embedding_init xavier --gdim 64                               # Flexible  
+--embedding_init fourier --fourier_scale 4.0 --gdim 64         # Better high-freq
+--embedding_init structured_fourier --num_freq_bands 10 --gdim 64 # Interpretable
+```
+
+### 🚀 **Getting Started Recommendations**
+
+**First-time users:**
+```bash
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init xavier --gdim 32
+```
+
+**Want better detail:**
+```bash
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 2.0 --gdim 32
+```
+
+**Want systematic control:**
+```bash
+./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init structured_fourier --num_freq_bands 5 --gdim 32
+```
+
+**Research/ablations:**
+- Start with `xavier` baseline
+- Compare against `fourier` with different scales
+- Use `structured_fourier` for frequency-specific studies
+
+**🎉 Ready to run E-D3DGS experiments with comprehensive embedding initialization and SLURM integration!** Start with the Quick Start section and monitor your experiments on Wandb! 🚀 

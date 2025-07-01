@@ -57,11 +57,8 @@ class ModelParams(ParamGroup):
         self.render_process=False
         self.loader = "colmap"
         self.shuffle = True
-        # ENHANCED EMBEDDINGS: Add parameters for comprehensive embedding initialization
+        # SIMPLIFIED EMBEDDINGS: Essential parameters only
         self.fourier_scale = 1.0
-        self.num_freq_bands = None
-        
-        # Legacy compatibility
         self.use_fourier_features = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -95,9 +92,10 @@ class ModelHiddenParams(ParamGroup):
         self.no_coarse_deform=False
         self.no_fine_deform=False
         
-        # EXPERIMENT PARAMETERS: Add embedding initialization options
-        self.embedding_init = "zero"  # zero, random, xavier, fourier, structured_fourier, etc.
-        self.temporal_embedding_init = "normal"  # normal, zero, xavier_uniform, sinusoidal
+        # COMPREHENSIVE EMBEDDING INITIALIZATION OPTIONS
+        self.embedding_init = "zero"  # zero, random, uniform, xavier, xavier_uniform, kaiming, he_uniform, fourier, structured_fourier, learned_fourier, positional, positional_encoding
+        self.temporal_embedding_init = "normal"  # normal, zero, uniform, xavier, xavier_uniform, kaiming, he_uniform, sinusoidal
+        self.num_freq_bands = None  # Number of frequency bands for structured Fourier (auto-calculated if None)
         
         self.total_num_frames=300
         self.c2f_temporal_iter=20000

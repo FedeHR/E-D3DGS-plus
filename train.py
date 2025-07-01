@@ -205,6 +205,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
+            if dataset.loader != 'nerfies':
+                viewpoint_cam.original_image = None
         
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
@@ -388,12 +390,12 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     elif hasattr(dataset, 'loader'):
         dataset_type = dataset.loader
     
-    # Enhanced wandb configuration with all required fields
+    # Comprehensive wandb configuration - keeps all useful logging
     config = {
         # Experiment identification
         "experiment_name": expname,
-        "dataset_type": dataset_type,  # Changed from "dataset" to avoid conflicts
-        "scene_name": scene_name,      # Changed from "scene" to be more specific
+        "dataset_type": dataset_type,
+        "scene_name": scene_name,
         
         # Key model parameters
         "gaussian_embedding_dim": hyper.gaussian_embedding_dim,
@@ -402,7 +404,6 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         "temporal_embedding_init": getattr(hyper, 'temporal_embedding_init', 'normal'),
         "use_fourier_features": getattr(dataset, 'use_fourier_features', False),
         "fourier_scale": getattr(dataset, 'fourier_scale', 1.0),
-        "num_freq_bands": getattr(dataset, 'num_freq_bands', None),
         
         # Training configuration
         "iterations": opt.iterations,
@@ -424,7 +425,6 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         "lambda_dssim": opt.lambda_dssim,
         "reg_coef": opt.reg_coef,
         "opacity_l1_coef_fine": getattr(opt, 'opacity_l1_coef_fine', 0.0),
-        "coef_tv_temporal_embedding": getattr(opt, 'coef_tv_temporal_embedding', 0.0),
         
         # Densification parameters
         "densify_from_iter": opt.densify_from_iter,
@@ -545,7 +545,7 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     
-    # Enhanced embedding parameters are handled by arguments/__init__.py
+    # Simplified embedding parameters handling
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -555,13 +555,8 @@ if __name__ == "__main__":
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     
-    # Embedding dimensions are handled by the argument groups automatically
-    
-    # The embedding initialization parameters are already handled by the argument groups
-    # Legacy compatibility for Fourier features
-    if hasattr(lp, 'embedding_init') and lp.embedding_init in ['fourier', 'positional', 'structured_fourier', 'learned_fourier']:
-        lp.use_fourier_features = True
-    elif hasattr(hp, 'embedding_init') and hp.embedding_init in ['fourier', 'positional', 'structured_fourier', 'learned_fourier']:
+    # Legacy compatibility for Fourier features (simplified)
+    if hasattr(hp, 'embedding_init') and hp.embedding_init == 'fourier':
         lp.use_fourier_features = True
     else:
         lp.use_fourier_features = False

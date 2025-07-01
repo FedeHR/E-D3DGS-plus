@@ -21,8 +21,6 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
-# SIMPLIFIED EMBEDDINGS: Import simplified, memory-efficient initialization
-from utils.simple_embedding_init import initialize_gaussian_embeddings, print_initialization_info
 
 
 class GaussianModel:
@@ -145,9 +143,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int, 
-                       embedding_init='zero', temporal_embedding_init='normal', 
-                       fourier_scale=1.0, **init_kwargs):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
@@ -165,20 +161,7 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-        
-        # COMPREHENSIVE EMBEDDING INITIALIZATION with scientific methods
-        num_freq_bands = init_kwargs.get('num_freq_bands', None)
-        print_initialization_info(embedding_init, self._deformation.gaussian_embedding_dim, 
-                                 fourier_scale=fourier_scale, num_freq_bands=num_freq_bands)
-        
-        embedding = initialize_gaussian_embeddings(
-            positions=fused_point_cloud,
-            embedding_dim=self._deformation.gaussian_embedding_dim,
-            init_type=embedding_init,
-            fourier_scale=fourier_scale,
-            num_freq_bands=num_freq_bands,
-            device="cuda"
-        )
+        embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 

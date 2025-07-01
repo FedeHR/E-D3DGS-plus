@@ -14,6 +14,7 @@ FOURIER_SCALE=0
 NUM_FREQ_BANDS=""
 EMBEDDING_INIT="zero"  # Changed to match current default
 TEMPORAL_EMBEDDING_INIT="normal"
+NUM_FREQ_BANDS=""  # Number of frequency bands for structured Fourier (auto-calculated if empty)
 GPU=0
 RESOLUTION=2
 SLURM=true  # Default to SLURM mode
@@ -249,6 +250,8 @@ while [[ $# -gt 0 ]]; do
         --abakus)
             SLURM_PARTITION="Abaki"
             SLURM_QOS="abaki"
+            SLURM_TIME="4:00:00"  # Default to 4 hours for Abakus
+            SLURM_MEM=""  # Abakus nodes don't support memory specification
             # Auto-detect reservation based on current day
             current_day=$(date +%u)  # 1=Monday, 7=Sunday
             if [[ "$current_day" == "7" ]]; then
@@ -304,18 +307,17 @@ generate_exp_name() {
     # Always add dimensions first
     local params="-gdim${GDIM}-tdim${TDIM}"
     
-    # Add frequency bands for structured Fourier (if specified)
-    if [[ -n "$NUM_FREQ_BANDS" ]]; then
-        params="${params}-bands${NUM_FREQ_BANDS}"
-    fi
-    
-    # Add Fourier features or initialization method at the end
+    # Add Fourier features or initialization method
     if [[ "$FOURIER_SCALE" != "0" ]]; then
-        # Using Fourier features - add fourier scale at the end
+        # Using Fourier features - add fourier scale
         params="${params}-fourier${FOURIER_SCALE}"
     elif [[ "$EMBEDDING_INIT" != "zero" ]]; then
         # Not using Fourier but using non-default initialization
         params="${params}-${EMBEDDING_INIT}"
+        # Add num_freq_bands for structured fourier
+        if [[ "$EMBEDDING_INIT" == "structured_fourier" && -n "$NUM_FREQ_BANDS" ]]; then
+            params="${params}${NUM_FREQ_BANDS}"
+        fi
     fi
     
     # Add temporal initialization if non-default
@@ -324,6 +326,12 @@ generate_exp_name() {
     fi
     
     echo "${exp_name}${params}"
+}
+
+# Generate friendly directory name with timestamp prefix for chronological sorting
+generate_log_dir_name() {
+    local exp_name_clean=$(echo "${EXP_NAME##*/}" | tr '/' '_')
+    echo "${TIMESTAMP}_${exp_name_clean}"
 }
 
 # Memory estimation function
@@ -366,8 +374,8 @@ mkdir -p experiments/slurm_jobs/$DATASET
 mkdir -p experiments/slurm_logs/$DATASET
 mkdir -p experiments/slurm_logs/$DATASET/${EXP_NAME##*/}
 
-# Generate SLURM script filename
-SLURM_SCRIPT="experiments/slurm_jobs/$DATASET/${DATASET}_${SCENE}${params}_${TIMESTAMP}.sh"
+# Generate SLURM script filename with descriptive name and timestamp
+SLURM_SCRIPT="experiments/slurm_jobs/$DATASET/${TIMESTAMP}_${DATASET}_${SCENE}_$(echo "${EXP_NAME##*/}" | sed 's/.*-//').sh"
 
 echo "🚀 E-D3DGS Experiment Runner"
 echo "=============================="
@@ -401,12 +409,21 @@ if [[ "$SLURM" == "true" ]]; then
 fi
 echo "   Dry run: $DRY_RUN"
 
+# Pre-flight checks and cache management
+echo "🔍 Running pre-flight checks..."
+python tools/manage_wandb_cache.py
+
+# Note: Image corruption check disabled for speed (takes ~20min)
+# To manually check images: python tools/check_images.py data/$SCENE
+echo "📝 Skipping image corruption check for speed (re-enable if needed)"
+
 if [[ "$SLURM" == "true" ]]; then
     echo ""
     echo "🔧 Generating SLURM script..."
     
-    # Create organized log directory within dataset folder
-    LOG_DIR="experiments/slurm_logs/$DATASET/${EXP_NAME##*/}"
+    # Create organized log directory with timestamp prefix for chronological sorting
+    LOG_DIR_NAME=$(generate_log_dir_name)
+    LOG_DIR="experiments/slurm_logs/$DATASET/${LOG_DIR_NAME}"
     mkdir -p "$LOG_DIR"
     
     # Generate SLURM script with better organization
@@ -421,10 +438,10 @@ if [[ "$SLURM" == "true" ]]; then
 #SBATCH --kill-on-invalid-dep=yes
 EOF
 
-    # Add memory specification only if explicitly provided or not using NvidiaAll
+    # Add memory specification only if explicitly provided and partition supports it
     if [[ -n "$SLURM_MEM" ]]; then
         echo "#SBATCH --mem=$SLURM_MEM" >> "$SLURM_SCRIPT"
-    elif [[ "$SLURM_PARTITION" != "NvidiaAll" ]]; then
+    elif [[ "$SLURM_PARTITION" != "NvidiaAll" && "$SLURM_PARTITION" != "Abaki" ]]; then
         echo "#SBATCH --mem=${ESTIMATED_MEMORY}G" >> "$SLURM_SCRIPT"
     fi
 
@@ -642,7 +659,7 @@ else
         echo "========================================"
         
         # Training with real-time output
-        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION
+        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
         
         if [ $? -eq 0 ]; then
             echo ""

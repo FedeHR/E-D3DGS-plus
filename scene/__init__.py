@@ -126,15 +126,20 @@ class Scene:
                                                     "iteration_" + str(self.loaded_iter),
                                                    ))
         else:
-            # ENHANCED EMBEDDINGS: Pass embedding initialization parameters to Gaussian creation
+            # COMPREHENSIVE EMBEDDINGS: Pass all embedding parameters including new scientific methods
             embedding_init = getattr(args, 'embedding_init', 'zero')
             temporal_embedding_init = getattr(args, 'temporal_embedding_init', 'normal')
             fourier_scale = getattr(args, 'fourier_scale', 1.0)
             num_freq_bands = getattr(args, 'num_freq_bands', None)
             
-            # Legacy compatibility
+            # Legacy compatibility for older experiments
             if getattr(args, 'use_fourier_features', False):
                 embedding_init = 'fourier'
+            
+            # Print dimensionality comparison for scientific understanding
+            if embedding_init in ['fourier', 'structured_fourier', 'positional', 'positional_encoding', 'learned_fourier']:
+                from utils.simple_embedding_init import print_dimensionality_comparison
+                print_dimensionality_comparison(getattr(args, 'gaussian_embedding_dim', 32), fourier_scale, num_freq_bands)
             
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime, 
                                          embedding_init=embedding_init,
