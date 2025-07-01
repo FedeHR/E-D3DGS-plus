@@ -21,6 +21,7 @@ SLURM=true  # Default to SLURM mode
 DRY_RUN=false
 SKIP_RENDER=false
 SKIP_EVAL=false
+SKIP_VIDEO=false
 
 # Paths
 GT_PATH="data"
@@ -137,8 +138,9 @@ Execution Options:
   --slurm                 Submit to SLURM (default behavior)
   --no_slurm              Run locally instead of SLURM
   --dry_run               Show commands without executing
-  --skip_render           Skip rendering step
-  --skip_eval             Skip evaluation step
+          --skip_render           Skip rendering step
+        --skip_eval             Skip evaluation step
+        --skip_video            Skip video generation (but still render test images)
 
 SLURM Options (only used with --slurm):
   --partition PART        SLURM partition (default: NvidiaAll)
@@ -241,6 +243,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip_eval)
             SKIP_EVAL=true
+            shift
+            ;;
+        --skip_video)
+            SKIP_VIDEO=true
             shift
             ;;
         --partition)
@@ -366,6 +372,12 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Generate experiment name
 EXP_NAME=$(generate_exp_name)
 
+# Generate unique hash based on all parameters to prevent identical experiments from overwriting
+PARAM_HASH=$(echo "${SCENE}_${GDIM}_${TDIM}_${FOURIER_SCALE}_${EMBEDDING_INIT}_${TEMPORAL_EMBEDDING_INIT}_${NUM_FREQ_BANDS}" | md5sum | cut -c1-8)
+
+# Generate unique folder name with timestamp and hash
+UNIQUE_FOLDER_NAME="${SCENE}_${DATASET}_${SCENE}_${TIMESTAMP}_${PARAM_HASH}"
+
 # Estimate memory requirements
 ESTIMATED_MEMORY=$(estimate_memory_requirements $GDIM $TDIM $DATASET)
 
@@ -383,10 +395,14 @@ echo "📋 Experiment Configuration:"
 echo "   Scene: $SCENE"
 echo "   Dataset: $DATASET (auto-detected)"
 echo "   Experiment name: $EXP_NAME"
+echo "   Results folder: $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME"
+echo "   Timestamp: $TIMESTAMP"
+echo "   Parameter hash: $PARAM_HASH"
 echo "   Gaussian embedding dim: $GDIM"
 echo "   Temporal embedding dim: $TDIM"
 echo "   Fourier scale: $FOURIER_SCALE $([ "$FOURIER_SCALE" = "0" ] && echo "(disabled - original behavior)" || echo "(enabled)")"
 echo "   Embedding init: $EMBEDDING_INIT"
+echo "   🎬 Video generation: $([ "$SKIP_VIDEO" = "true" ] && echo "Disabled" || echo "Enabled (video_rgb.mp4 will be created)")"
 echo "   💾 Estimated memory: ${ESTIMATED_MEMORY}GB"
 echo "   GPU: $GPU"
 echo "   Resolution: $RESOLUTION"
@@ -549,7 +565,7 @@ echo "TRAINING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
 done ) &
 MONITOR_PID=\$!
 
-CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
+CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
 
 # Stop monitoring
 kill \$MONITOR_PID 2>/dev/null || true
@@ -565,7 +581,7 @@ EOF
     # Rendering
     echo "🎨 Starting rendering..."
     echo "RENDERING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
-    CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --skip_train --configs arguments/$DATASET/$SCENE.py
+    CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
     
     if [ \$? -eq 0 ]; then
         echo "✅ Rendering completed successfully!"
@@ -584,7 +600,7 @@ EOF
     # Evaluation
     echo "📈 Starting evaluation..."
     echo "EVALUATION|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
-    CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}
+    CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME
     
     if [ \$? -eq 0 ]; then
         echo "✅ Evaluation completed successfully!"
@@ -607,7 +623,7 @@ fi
 
 echo "🎉 Experiment completed successfully!"
 echo "Check your wandb dashboard: https://wandb.ai/\$WANDB_ENTITY/\$WANDB_PROJECT"
-echo "Results saved to: $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}"
+echo "Results saved to: $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME"
 echo "Completed: \$(date)"
 EOF
 
@@ -642,12 +658,12 @@ else
     
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "🔍 Dry run mode - would execute:"
-        echo "   CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname \"$EXP_NAME\" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION"
+        echo "   CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname \"$EXP_NAME\" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION"
         if [[ "$SKIP_RENDER" != "true" ]]; then
-            echo "   CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --skip_train --configs arguments/$DATASET/$SCENE.py"
+            echo "   CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")"
         fi
         if [[ "$SKIP_EVAL" != "true" ]]; then
-            echo "   CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}"
+            echo "   CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME"
         fi
     else
         # Setup environment
@@ -659,7 +675,7 @@ else
         echo "========================================"
         
         # Training with real-time output
-        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
+        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
         
         if [ $? -eq 0 ]; then
             echo ""
@@ -669,7 +685,7 @@ else
                 echo ""
                 echo "🎨 Starting rendering..."
                 echo "========================================"
-                CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE} --skip_train --configs arguments/$DATASET/$SCENE.py
+                CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
                 
                 if [ $? -eq 0 ]; then
                     echo "✅ Rendering completed successfully!"
@@ -683,7 +699,7 @@ else
                 echo ""
                 echo "📈 Starting evaluation..."
                 echo "========================================"
-                CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}
+                CUDA_VISIBLE_DEVICES=$GPU python metrics.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME
                 
                 if [ $? -eq 0 ]; then
                     echo "✅ Evaluation completed successfully!"
@@ -696,7 +712,7 @@ else
             echo ""
             echo "🎉 Experiment completed successfully!"
             echo "🔗 Check your wandb dashboard: https://wandb.ai/$WANDB_ENTITY/$WANDB_PROJECT"
-            echo "📁 Results saved to: $SAVE_PATH/$DATASET/${SCENE}_${DATASET}_${SCENE}"
+            echo "📁 Results saved to: $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME"
         else
             echo "❌ Training failed!"
             exit 1
