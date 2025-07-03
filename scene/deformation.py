@@ -24,8 +24,11 @@ class deform_network(nn.Module):
         self.num_frames = num_frames
         self.temporal_embedding_dim = args.temporal_embedding_dim
         
-        # Determine Gaussian embedding dimension based on Fourier initialization
-        if getattr(args, 'use_fourier_embedding_init', False):
+        # Determine Gaussian embedding dimension based on Fourier options
+        use_fourier_init = getattr(args, 'use_fourier_embedding_init', False)
+        use_fourier_transform = getattr(args, 'use_fourier_embedding_transform', False)
+        
+        if use_fourier_init or use_fourier_transform:
             fourier_frequencies = getattr(args, 'fourier_frequencies')
             self.gaussian_embedding_dim = 2 * fourier_frequencies  # Fourier output dimension
         else:
@@ -89,7 +92,7 @@ class deform_network(nn.Module):
             else:
                 h = self.get_temporal_embed(t, self.int_lininterp(iter, num_down_emb, self.max_embeddings, self.c2f_temporal_iter))
     
-        # Get Gaussian embeddings (now potentially initialized with Fourier features)
+        # Get Gaussian embeddings (now potentially initialized with Fourier features or transformed through Fourier mapping)
         if type(pc) == type(None):
             h = torch.cat([h, embeddings], dim=-1)
         else:        

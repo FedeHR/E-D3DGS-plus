@@ -11,8 +11,6 @@ class SimpleFourierMapper(nn.Module):
     with learned Gaussian embeddings, preserving the original architecture
     that uses only embeddings (not raw coordinates) as network input.
     
-    γ(x) = [a * sin(2π B x), a * cos(2π B x)] / ||a||
-    
     where B is a matrix of random frequencies sampled from N(0,1) and a are learnable 
     amplitude coefficients that control the magnitude of different frequencies.
     Based on "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"
@@ -23,7 +21,7 @@ class SimpleFourierMapper(nn.Module):
         Initialize Fourier mapper.
         
         Args:
-            input_dim (int): Dimension of input (e.g., 3 for xyz coordinates)
+            input_dim (int): Dimension of input (e.g., 3 for xyz coordinates, 32 for embedding vectors)
             num_frequencies (int): Number of frequency components
             use_amplitude_coefficients (bool): Whether to use learnable amplitude coefficients
         """

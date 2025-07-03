@@ -52,22 +52,37 @@ class GaussianModel:
         
         # Initialize Fourier mapping for embedding initialization if enabled
         self.use_fourier_embedding_init = getattr(args, 'use_fourier_embedding_init', False)
+        self.use_fourier_embedding_transform = getattr(args, 'use_fourier_embedding_transform', False)
+        
         if self.use_fourier_embedding_init:
             fourier_frequencies = getattr(args, 'fourier_frequencies')
-            use_amplitude_coefficients = getattr(args, 'use_amplitude_coefficients', True)
+            use_amplitude_coefficients = getattr(args, 'use_amplitude_coefficients', False)
             
-            self.fourier_mapper = SimpleFourierMapper(
+            self.fourier_mapper_init = SimpleFourierMapper(
                 input_dim=3,  # xyz coordinates
                 num_frequencies=fourier_frequencies,
                 use_amplitude_coefficients=use_amplitude_coefficients
             )
             
             # When using Fourier initialization, embedding dimension equals Fourier output dimension
-            self.embedding_dim = self.fourier_mapper.output_dim
+            self.embedding_dim = self.fourier_mapper_init.output_dim
         else:
-            self.fourier_mapper = None
+            self.fourier_mapper_init = None
             # Use default embedding dimension from args
-            self.embedding_dim = getattr(args, 'gaussian_embedding_dim', 32)
+            self.embedding_dim = getattr(args, 'gaussian_embedding_dim')
+        
+        # Initialize Fourier mapping for embedding transformation if enabled
+        if self.use_fourier_embedding_transform:
+            fourier_frequencies = getattr(args, 'fourier_frequencies')
+            use_amplitude_coefficients = getattr(args, 'use_amplitude_coefficients', False)
+            
+            self.fourier_mapper_transform = SimpleFourierMapper(
+                input_dim=self.embedding_dim,  # embedding dimension
+                num_frequencies=fourier_frequencies,
+                use_amplitude_coefficients=use_amplitude_coefficients
+            )
+        else:
+            self.fourier_mapper_transform = None
         
         self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
                                            min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
@@ -155,7 +170,11 @@ class GaussianModel:
     
     @property
     def get_embedding(self):
-        return self._embedding
+        # TODO not clear if the embedding should be the transformed or not when retrieving it
+        if self.use_fourier_embedding_transform:
+            return self.fourier_mapper_transform(self._embedding)
+        else:
+            return self._embedding
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
@@ -186,16 +205,21 @@ class GaussianModel:
         # Initialize embeddings with Fourier features if enabled, otherwise use zeros
         if self.use_fourier_embedding_init:
             # Move Fourier mapper to CUDA first
-            self.fourier_mapper = self.fourier_mapper.to("cuda")
+            self.fourier_mapper_init = self.fourier_mapper_init.to("cuda")
             # Initialize embeddings with Fourier-mapped xyz coordinates
             with torch.no_grad():
-                embedding = self.fourier_mapper(fused_point_cloud).float()
+                embedding = self.fourier_mapper_init(fused_point_cloud).float()
             print(f"Initialized embeddings with Fourier features: {embedding.shape}")
         else:
-            embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()
+            # Use the embedding dimension (which is the input to any potential Fourier transform)
+            embedding = torch.zeros((fused_color.shape[0], self.embedding_dim)).float().cuda()
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._deformation = self._deformation.to("cuda") 
+        self._deformation = self._deformation.to("cuda")
+        
+        # Move Fourier transform mapper to CUDA if enabled
+        if self.use_fourier_embedding_transform and self.fourier_mapper_transform is not None:
+            self.fourier_mapper_transform = self.fourier_mapper_transform.to("cuda") 
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
@@ -222,9 +246,13 @@ class GaussianModel:
         ]
         
         # Add Fourier mapper parameters if using learnable amplitude coefficients
-        if self.use_fourier_embedding_init and self.fourier_mapper.use_amplitude_coefficients:
+        if self.use_fourier_embedding_init and self.fourier_mapper_init.use_amplitude_coefficients:
             fourier_lr = getattr(training_args, 'fourier_lr', training_args.feature_lr)
-            l.append({'params': list(self.fourier_mapper.parameters()), 'lr': fourier_lr, "name": "fourier"})
+            l.append({'params': list(self.fourier_mapper_init.parameters()), 'lr': fourier_lr, "name": "fourier_init"})
+        
+        if self.use_fourier_embedding_transform and self.fourier_mapper_transform.use_amplitude_coefficients:
+            fourier_lr = getattr(training_args, 'fourier_lr', training_args.feature_lr)
+            l.append({'params': list(self.fourier_mapper_transform.parameters()), 'lr': fourier_lr, "name": "fourier_transform"})
         
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -268,8 +296,10 @@ class GaussianModel:
         weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
         self._deformation.load_state_dict(weight_dict)
         self._deformation = self._deformation.to("cuda")
-        if self.fourier_mapper is not None:
-            self.fourier_mapper = self.fourier_mapper.to("cuda")
+        if self.fourier_mapper_init is not None:
+            self.fourier_mapper_init = self.fourier_mapper_init.to("cuda")
+        if self.fourier_mapper_transform is not None:
+            self.fourier_mapper_transform = self.fourier_mapper_transform.to("cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def save_deformation(self, path):
@@ -374,7 +404,7 @@ class GaussianModel:
             if len(group["params"]) > 1 or group["name"] == "offsets":
                 continue
             # Skip parameter groups that don't correspond to per-point parameters (e.g., fourier parameters)
-            if group["name"] == "fourier":
+            if group["name"] in ["fourier_init", "fourier_transform"]:
                 continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:

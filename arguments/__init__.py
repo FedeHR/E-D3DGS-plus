@@ -98,7 +98,10 @@ class ModelHiddenParams(ParamGroup):
         # Fourier mapping parameters for embedding initialization
         self.use_fourier_embedding_init=False
         self.fourier_frequencies=4
-        self.use_amplitude_coefficients=True
+        self.use_amplitude_coefficients=False
+        
+        # Fourier mapping parameters for whole embedding transformation
+        self.use_fourier_embedding_transform=False
         
         super().__init__(parser, "ModelHiddenParams")
         
