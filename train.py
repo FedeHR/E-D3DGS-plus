@@ -305,8 +305,14 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     # Initialize wandb for logging with some relevant parameters
     wandb.init(project="E-D3DGS", name=expname, config={
         "dataset": str(dataset),
+        "gdim": hyper.gaussian_embedding_dim,
         "iterations": opt.iterations,
         "learning_rate": opt.position_lr_init,
+        "n_freq_emb": hyper.fourier_frequencies,
+        "use_fourier_embedding_transform": hyper.use_fourier_embedding_transform,
+        "use_fourier_init": hyper.use_fourier_embedding_init,
+        "opacity_threshold_fine_init": opt.opacity_threshold_fine_init,
+        "opacity_threshold_fine_after": opt.opacity_threshold_fine_after
     })
     
     gaussians = GaussianModel(dataset.sh_degree, hyper)
