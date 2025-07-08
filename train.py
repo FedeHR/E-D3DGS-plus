@@ -40,7 +40,8 @@ from lpipsPyTorch import lpips
 
 
 def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
-    """Evaluate on test cameras and return metrics"""
+    """Evaluate on test cameras and return metrics, with wandb image logging"""
+    
     test_cams = scene.getTestCameras()
     
     # Sample a subset of test cameras for efficiency (max 10)
@@ -55,8 +56,12 @@ def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
     test_ssims = []
     test_lpips_scores = []
     
+    # For image logging - use first camera for visual comparison
+    log_real_img = None
+    log_gen_img = None
+    
     with torch.no_grad():
-        for viewpoint_cam in test_cams_sample:
+        for idx, viewpoint_cam in enumerate(test_cams_sample):
             if type(viewpoint_cam.original_image) == type(None):
                 viewpoint_cam.load_image()
             
@@ -75,6 +80,22 @@ def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
             test_psnrs.append(psnr_val.item())
             test_ssims.append(ssim_val.item())
             test_lpips_scores.append(lpips_val.item())
+            
+            # Capture images for logging (from first camera)
+            if idx == 0:
+                # Clamp and convert to numpy for wandb logging
+                log_real_img = torch.clamp(gt_image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
+                log_gen_img = torch.clamp(image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
+    
+    # Log images to wandb (creates the Media section with slider)
+    if log_real_img is not None and log_gen_img is not None:
+        try:
+            wandb.log({
+                "Real Image": wandb.Image(log_real_img, caption="Real"),
+                "Generated Image": wandb.Image(log_gen_img, caption="Generated")
+            }, step=iteration)
+        except Exception as e:
+            print(f"Warning: Failed to log images to wandb: {e}")
     
     return {
         'test/L1': np.mean(test_l1_losses),

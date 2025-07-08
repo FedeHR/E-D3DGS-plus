@@ -1,4 +1,4 @@
-# 🚀 E-D3DGS Experiment Guide
+# 🚀 E-D3DGS PLUS Experiment Guide
 
 **E-D3DGS** (Enhanced Dynamic 3D Gaussian Splatting) extends static 3D Gaussian Splatting to handle temporal dynamics in scenes, with optional Fourier feature enhancements for improved spatial representation.
 
@@ -14,7 +14,7 @@ This project investigates:
 
 ### 1. Setup Environment
 ```bash
-# Activate conda environment
+# Activate conda environment (REQUIRED!)
 conda activate ed3dgs
 
 # Setup Wandb for experiment tracking
@@ -23,6 +23,8 @@ source bin/setup_wandb_team.sh
 # Verify everything works
 ./tools/check_setup.sh
 ```
+
+**⚠️ Important**: The conda environment **must be activated** before running experiments. The pre-flight checks require packages like `psutil` that are only available in the `ed3dgs` environment. If you see import errors, ensure conda is activated.
 
 ### 2. Run Your First Experiment
 ```bash
@@ -39,7 +41,8 @@ source bin/setup_wandb_team.sh
 
 ### 3. View Results
 - **Wandb Dashboard**: https://wandb.ai/harjes-ludwig-maximilianuniversity-of-munich/E-D3DGS
-- **Local Results**: `results/dynerf/cut_roasted_beef_*/`
+- **Local Results**: `results/`
+- **Local Wandb Data**: `wandb/` (detailed experiment tracking - see below)
 
 ## 🎮 Running Experiments
 
@@ -90,6 +93,7 @@ source bin/setup_wandb_team.sh
 | `--num_freq_bands` | auto | Frequency bands for structured Fourier | Frequency coverage range |
 | `--gpu` | 0 | GPU device ID | Hardware selection |
 | `--resolution` | 2 | Resolution scaling factor | Training speed vs quality |
+| `--time` | auto | Custom time limit (HH:MM:SS format) | SLURM job duration control |
 
 **Auto-detected Datasets:**
 - **DyNeRF**: coffee_martini, cook_spinach, cut_roasted_beef, flame_salmon_1, flame_steak, sear_steak
@@ -341,6 +345,33 @@ All methods have the same computational cost for the same `gdim`, but:
 ```
 
 ## 📊 Enhanced Wandb Tracking & Metrics
+
+### 🖼️ **NEW: Visual Progress Tracking**
+
+**Real vs Generated Image Comparison:**
+- **Frequency**: Every 1000 iterations during test evaluation
+- **Location**: Wandb **Media** section with iteration slider
+- **Content**: Side-by-side comparison of real ground truth vs generated images
+- **Navigation**: Use the step slider to see training progress visually
+- **Camera**: Uses first test camera for consistency
+
+This creates the exact interface you see in Wandb with "Real Image" and "Generated Image" that you can scrub through with the iteration slider! 🎬
+
+**Example Wandb Media View:**
+```
+Media                                          1-2 of 2
+┌─────────────────────┐
+│   Real Image        │  ← Ground truth
+│   [kitchen scene]   │
+└─────────────────────┘
+Step [======●=========] 80000
+
+┌─────────────────────┐ 
+│ Generated Image     │  ← Model output
+│ [kitchen scene]     │
+└─────────────────────┘
+Step [======●=========] 80000
+```
 
 ### 🎯 Core Metrics (Every 100 Iterations)
 
@@ -643,6 +674,15 @@ done
 - **Reserved times**: Sunday & Monday 8:00-22:00 for compvis25 group
 - **No memory specification**: Nodes don't support `--mem` parameter
 
+**Custom Time Limits:**
+- **Default**: `--abakus` sets 4:00:00 (4 hours)
+- **Custom**: Use `--time HH:MM:SS` for specific durations
+- **Examples**: 
+  - `--time 7:30:00` (7 hours 30 minutes)
+  - `--time 2:15:00` (2 hours 15 minutes)
+  - `--time 12:00:00` (12 hours)
+- **⚠️ Note**: Custom time overrides partition defaults
+
 **Reservations (Auto-detected by script):**
 - **Sunday**: `compvis25_So` (8:00-22:00)
 - **Monday**: `compvis25_Mo` (8:00-22:00)
@@ -733,10 +773,16 @@ sreport cluster utilization start=2025-06-01 end=2025-06-30
 ./bin/run_experiment.sh --scene vrig-chicken --abakus --gdim 32 --tdim 256
 ```
 
-**For Longer Jobs (Use reservations):**
+**For Longer Jobs (Use custom time or reservations):**
 ```bash
+# Custom time limits (works with any partition)
+./bin/run_experiment.sh --scene cut_roasted_beef --abakus --time 7:30:00
+
 # Use Sunday/Monday reservations for longer runs
 ./bin/run_experiment.sh --scene cut_roasted_beef --abakus --reservation compvis25_So
+
+# Combine custom time with reservations
+./bin/run_experiment.sh --scene cut_roasted_beef --abakus --time 8:00:00 --reservation compvis25_So
 ```
 
 **Resource Guidelines:**
@@ -826,6 +872,216 @@ ls -t experiments/slurm_logs/hypernerf/
 ls experiments/slurm_logs/dynerf/ | grep $(date +%Y%m%d)
 ```
 
+## 📊 Local Wandb Experiment Tracking
+
+### 🗂️ Wandb Folder Structure
+
+The `wandb/` directory contains detailed tracking data for **every experiment run** locally. Each experiment creates a timestamped run directory with comprehensive logging:
+
+```
+wandb/
+├── run-20250702_173239-ffel0omj/     ← Individual experiment run
+│   ├── files/
+│   │   ├── wandb-summary.json        ← Final metrics and results
+│   │   ├── config.yaml               ← Complete experiment configuration
+│   │   ├── wandb-metadata.json       ← System info and runtime details
+│   │   ├── requirements.txt          ← Python dependencies snapshot
+│   │   ├── conda-environment.yaml    ← Complete conda environment
+│   │   ├── diff.patch               ← Code changes from last commit
+│   │   └── code/
+│   │       └── train.py             ← Exact code used for experiment
+│   ├── logs/
+│   │   ├── debug.log               ← Wandb internal logs
+│   │   └── debug-internal.log      ← Detailed debugging info
+│   └── tmp/                        ← Temporary files during run
+├── latest-run/                     ← Symlink to most recent run
+├── debug.log                       ← Global wandb debug log
+└── debug-internal.log              ← Global internal logs
+```
+
+### 📋 What's Tracked in Each Run
+
+#### **1. Final Results (`wandb-summary.json`)**
+Key metrics from completed experiments:
+```json
+{
+  "Number of Gaussians": 90573,
+  "iterations": 80000,
+  "test/PSNR": 27.17,
+  "test/SSIM": 0.899,
+  "test/LPIPS": 0.176,
+  "train/PSNR": 27.30,
+  "memory_allocated_GB": 1.03,
+  "_runtime": 369.32
+}
+```
+
+#### **2. Complete Configuration (`config.yaml`)**
+Every experiment parameter is logged:
+```yaml
+experiment_name: "dynerf/cut_roasted_beef-gdim32-tdim256"
+dataset_type: "dynerf"
+scene_name: "cut_roasted_beef"
+gaussian_embedding_dim: 32
+temporal_embedding_dim: 256
+embedding_init: "zero"
+fourier_scale: 0.0
+iterations: 80000
+position_lr_init: 0.00016
+# ... and 20+ more parameters
+```
+
+#### **3. System Information (`wandb-metadata.json`)**
+Hardware and environment details:
+```json
+{
+  "host": "cipollino.cip.ifi.lmu.de",
+  "gpu": "NVIDIA GeForce RTX 2060 SUPER",
+  "cpu_count": 8,
+  "memory": {"total": 62.64},
+  "python": "3.7.16",
+  "git": {"commit": "ba3e3b7a28fd..."},
+  "args": ["-s", "data/cut_roasted_beef", "--gdim", "32", ...]
+}
+```
+
+#### **4. Code Reproducibility**
+- **Exact code snapshot**: `code/train.py` (exact version used)
+- **Environment**: `conda-environment.yaml` (complete conda env)
+- **Dependencies**: `requirements.txt` (Python packages)
+- **Code changes**: `diff.patch` (changes from last git commit)
+
+### 🔍 Useful Wandb Analysis Commands
+
+#### **Find Recent Experiments:**
+```bash
+# List recent runs (newest first)
+ls -t wandb/run-*/
+
+# Count total experiments
+ls wandb/run-*/ | wc -l
+
+# Find experiments from today
+ls wandb/run-$(date +%Y%m%d)*/ 2>/dev/null || echo "No runs today"
+```
+
+#### **Extract Final Metrics:**
+```bash
+# Get final PSNR from recent runs
+for run in $(ls -t wandb/run-*/files/wandb-summary.json | head -5); do
+    echo "=== $(basename $(dirname $(dirname $run))) ==="
+    cat $run | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f'PSNR: {data.get(\"test/PSNR\", \"N/A\"):.2f}')
+print(f'SSIM: {data.get(\"test/SSIM\", \"N/A\"):.3f}')
+print(f'LPIPS: {data.get(\"test/LPIPS\", \"N/A\"):.3f}')
+print(f'Gaussians: {data.get(\"Number of Gaussians\", \"N/A\")}')
+print(f'Runtime: {data.get(\"_runtime\", \"N/A\"):.1f}s')
+print()
+"
+done
+```
+
+#### **Compare Experiment Parameters:**
+```bash
+# Compare gaussian dimensions across recent runs
+echo "Gaussian Embedding Dimensions in Recent Runs:"
+for run in $(ls -t wandb/run-*/files/config.yaml | head -10); do
+    gdim=$(grep "gaussian_embedding_dim:" $run | awk '{print $2}')
+    experiment=$(grep "experiment_name:" $run | awk '{print $2}' | tr -d '"')
+    echo "$experiment -> gdim: $gdim"
+done
+```
+
+#### **Find Best Performing Experiments:**
+```bash
+# Find runs with highest PSNR
+echo "Top 5 PSNR Results:"
+for run in $(ls wandb/run-*/files/wandb-summary.json); do
+    psnr=$(cat $run | python3 -c "import json, sys; print(json.load(sys.stdin).get('test/PSNR', 0))" 2>/dev/null || echo "0")
+    echo "$psnr $run"
+done | sort -nr | head -5 | while read psnr path; do
+    run_id=$(basename $(dirname $(dirname $path)))
+    echo "PSNR: $psnr - Run: $run_id"
+done
+```
+
+### 📈 Integration with Wandb Dashboard
+
+The local `wandb/` data syncs with your **online Wandb dashboard**:
+
+- **Local**: Detailed files, logs, and exact reproducibility info
+- **Online**: Interactive plots, metrics visualization, run comparisons
+- **Dashboard URL**: https://wandb.ai/harjes-ludwig-maximilianuniversity-of-munich/E-D3DGS
+
+**Benefits of Local Wandb Data:**
+- ✅ **Complete reproducibility** - exact code, environment, and parameters
+- ✅ **Offline analysis** - query results without internet connection  
+- ✅ **Detailed debugging** - access to internal logs and metadata
+- ✅ **Code snapshots** - see exact version used for any experiment
+- ✅ **Environment tracking** - conda/pip dependencies for each run
+- ✅ **System profiling** - hardware specs and resource usage
+
+### 🎯 Common Wandb Workflows
+
+#### **Reproduce a Specific Run:**
+```bash
+# Find the run you want to reproduce
+RUN_ID="run-20250702_173239-ffel0omj"
+
+# Check the exact parameters used
+cat wandb/$RUN_ID/files/config.yaml
+
+# Check the exact command line
+cat wandb/$RUN_ID/files/wandb-metadata.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print('Exact command:', ' '.join(data['args']))
+"
+
+# Check if code was modified
+if [ -f wandb/$RUN_ID/files/diff.patch ]; then
+    echo "Code was modified from git commit:"
+    cat wandb/$RUN_ID/files/diff.patch
+fi
+```
+
+#### **Debug Failed Experiments:**
+```bash
+# Check logs for errors
+tail -50 wandb/$RUN_ID/logs/debug.log
+
+# Check system resources during run
+cat wandb/$RUN_ID/files/wandb-metadata.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(f'GPU: {data[\"gpu\"]}')
+print(f'Memory: {data[\"memory\"][\"total\"]:.1f} GB')
+print(f'Disk space: {data[\"disk\"][\"/\"][\"total\"]:.1f} GB')
+"
+```
+
+#### **Track Parameter Sweeps:**
+```bash
+# Find all experiments with different gaussian dimensions
+echo "Gaussian Dimension Sweep Results:"
+for gdim in 4 8 16 32 64; do
+    echo "=== GDIM $gdim ==="
+    for run in wandb/run-*/files/config.yaml; do
+        if grep -q "gaussian_embedding_dim: $gdim" $run; then
+            summary_file=$(dirname $run)/wandb-summary.json
+            if [ -f $summary_file ]; then
+                psnr=$(cat $summary_file | python3 -c "import json,sys; print(f'{json.load(sys.stdin).get(\"test/PSNR\", 0):.2f}')" 2>/dev/null)
+                echo "  PSNR: $psnr ($(basename $(dirname $(dirname $run))))"
+            fi
+        fi
+    done
+done
+```
+
+**💡 The `wandb/` folder is your local experiment database** - use it for detailed analysis, debugging, and ensuring complete reproducibility of your E-D3DGS research! 🚀
+
 ## 🚨 Troubleshooting
 
 ### Common Issues
@@ -838,6 +1094,8 @@ ls experiments/slurm_logs/dynerf/ | grep $(date +%Y%m%d)
 | Job killed after 4 hours | Increase time: `--time 8:00:00` or use reservation |
 | Conda environment not found | Run `conda activate ed3dgs` |
 | Wandb not logging | Check `source bin/setup_wandb_team.sh` |
+| Wandb offline/no internet | Local data still tracked in `wandb/` folder |
+| Missing wandb data | Check `wandb/run-*/files/` for experiment files |
 | Permission denied | Check file permissions with `chmod +x bin/run_experiment.sh` |
 | Out of memory | Reduce `--resolution` or use smaller `--gdim`/`--tdim` |
 | Training stuck at "Loading image" | Normal for first iteration - wait for training to start |

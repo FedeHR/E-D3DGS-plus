@@ -141,6 +141,7 @@ Execution Options:
           --skip_render           Skip rendering step
         --skip_eval             Skip evaluation step
         --skip_video            Skip video generation (but still render test images)
+        --time HH:MM:SS         Set custom time limit (e.g., --time 7:30:00 for 7h 30min)
 
 SLURM Options (only used with --slurm):
   --partition PART        SLURM partition (default: NvidiaAll)
@@ -277,6 +278,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --time)
             SLURM_TIME="$2"
+            echo "⏰ Custom time limit set to: $SLURM_TIME"
             shift 2
             ;;
         --cpus)
@@ -376,7 +378,7 @@ EXP_NAME=$(generate_exp_name)
 PARAM_HASH=$(echo "${SCENE}_${GDIM}_${TDIM}_${FOURIER_SCALE}_${EMBEDDING_INIT}_${TEMPORAL_EMBEDDING_INIT}_${NUM_FREQ_BANDS}" | md5sum | cut -c1-8)
 
 # Generate unique folder name with timestamp and hash
-UNIQUE_FOLDER_NAME="${SCENE}_${DATASET}_${SCENE}_${TIMESTAMP}_${PARAM_HASH}"
+UNIQUE_FOLDER_NAME="${SCENE}_${TIMESTAMP}_${PARAM_HASH}"
 
 # Estimate memory requirements
 ESTIMATED_MEMORY=$(estimate_memory_requirements $GDIM $TDIM $DATASET)
@@ -427,6 +429,9 @@ echo "   Dry run: $DRY_RUN"
 
 # Pre-flight checks and cache management
 echo "🔍 Running pre-flight checks..."
+# Activate conda environment for pre-flight checks
+source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || true
+conda activate ed3dgs 2>/dev/null || echo "⚠️  Warning: Could not activate ed3dgs environment"
 python tools/manage_wandb_cache.py
 
 # Note: Image corruption check disabled for speed (takes ~20min)
