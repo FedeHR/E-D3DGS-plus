@@ -40,7 +40,7 @@ from lpipsPyTorch import lpips
 
 
 def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
-    """Evaluate on test cameras and return metrics, with wandb image logging"""
+    """Evaluate on test cameras and return metrics, with enhanced wandb image logging"""
     
     test_cams = scene.getTestCameras()
     
@@ -56,9 +56,8 @@ def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
     test_ssims = []
     test_lpips_scores = []
     
-    # For image logging - use first camera for visual comparison
-    log_real_img = None
-    log_gen_img = None
+    # Enhanced image logging - collect multiple images for better media tracking
+    wandb_images = []
     
     with torch.no_grad():
         for idx, viewpoint_cam in enumerate(test_cams_sample):
@@ -81,21 +80,51 @@ def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
             test_ssims.append(ssim_val.item())
             test_lpips_scores.append(lpips_val.item())
             
-            # Capture images for logging (from first camera)
-            if idx == 0:
-                # Clamp and convert to numpy for wandb logging
-                log_real_img = torch.clamp(gt_image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
-                log_gen_img = torch.clamp(image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
+            # Collect images for wandb logging (enhanced: use multiple cameras)
+            if idx < 3:  # Log first 3 cameras for better comparison
+                try:
+                    # Clamp and convert to numpy for wandb logging
+                    real_img = torch.clamp(gt_image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
+                    gen_img = torch.clamp(image, 0.0, 1.0).detach().cpu().permute(1, 2, 0).numpy()
+                    
+                    # Create side-by-side comparison
+                    comparison = np.concatenate([real_img, gen_img], axis=1)
+                    
+                    wandb_images.append(wandb.Image(
+                        comparison, 
+                        caption=f"Cam {cam_no} - L1:{l1_loss_val.item():.4f}, PSNR:{psnr_val.item():.2f}dB"
+                    ))
+                    
+                    # Also log individual images
+                    wandb_images.append(wandb.Image(real_img, caption=f"Real - Cam {cam_no}"))
+                    wandb_images.append(wandb.Image(gen_img, caption=f"Generated - Cam {cam_no}"))
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to prepare image {idx} for wandb logging: {e}")
+                    continue
     
-    # Log images to wandb (creates the Media section with slider)
-    if log_real_img is not None and log_gen_img is not None:
+    # Enhanced wandb logging with multiple images and better error handling
+    if wandb_images:
         try:
+            # Log all collected images
             wandb.log({
-                "Real Image": wandb.Image(log_real_img, caption="Real"),
-                "Generated Image": wandb.Image(log_gen_img, caption="Generated")
+                "Test Images": wandb_images,
+                "Real vs Generated": wandb_images[0] if wandb_images else None,
             }, step=iteration)
+            
+            print(f"✅ Successfully logged {len(wandb_images)} images to wandb")
+            
         except Exception as e:
             print(f"Warning: Failed to log images to wandb: {e}")
+            # Fallback: try to log just the first comparison
+            if wandb_images:
+                try:
+                    wandb.log({"Test Comparison": wandb_images[0]}, step=iteration)
+                    print("✅ Fallback: logged single comparison image")
+                except Exception as e2:
+                    print(f"Error: Complete wandb image logging failure: {e2}")
+    else:
+        print("⚠️  No images were collected for wandb logging")
     
     return {
         'test/L1': np.mean(test_l1_losses),

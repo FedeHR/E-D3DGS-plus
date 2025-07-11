@@ -22,6 +22,7 @@ DRY_RUN=false
 SKIP_RENDER=false
 SKIP_EVAL=false
 SKIP_VIDEO=false
+FORCE_RENDER=false  # New flag to force re-rendering even if folders exist
 
 # Paths
 GT_PATH="data"
@@ -138,9 +139,10 @@ Execution Options:
   --slurm                 Submit to SLURM (default behavior)
   --no_slurm              Run locally instead of SLURM
   --dry_run               Show commands without executing
-          --skip_render           Skip rendering step
-        --skip_eval             Skip evaluation step
-        --skip_video            Skip video generation (but still render test images)
+            --skip_render           Skip rendering step
+  --skip_eval             Skip evaluation step
+  --skip_video            Skip video generation (but still render test images)
+  --force_render          Force re-rendering even if video/test folders exist
         --time HH:MM:SS         Set custom time limit (e.g., --time 7:30:00 for 7h 30min)
 
 SLURM Options (only used with --slurm):
@@ -248,6 +250,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip_video)
             SKIP_VIDEO=true
+            shift
+            ;;
+        --force_render)
+            FORCE_RENDER=true
             shift
             ;;
         --partition)
@@ -583,18 +589,70 @@ EOF
 
     if [[ "$SKIP_RENDER" != "true" ]]; then
         cat >> "$SLURM_SCRIPT" << EOF
-    # Rendering
+    # Enhanced Rendering with validation
     echo "🎨 Starting rendering..."
     echo "RENDERING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
-    CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
     
-    if [ \$? -eq 0 ]; then
-        echo "✅ Rendering completed successfully!"
-        echo "RENDERING_DONE|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
+    # Check if video and test folders already exist (unless force_render is true)
+    VIDEO_PATH="$SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME/video"
+    TEST_PATH="$SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME/test"
+    
+    if [[ "$FORCE_RENDER" == "true" ]] || [[ ! -d "\$VIDEO_PATH" ]] || [[ ! -d "\$TEST_PATH" ]]; then
+        echo "🔄 Rendering required - video or test folder missing or force_render enabled"
+        
+        # Try rendering with retry mechanism
+        RENDER_SUCCESS=false
+        for attempt in 1 2 3; do
+            echo "🎬 Rendering attempt \$attempt/3..."
+            
+            CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
+            
+            if [ \$? -eq 0 ]; then
+                # Validate that required folders were created
+                if [[ -d "\$VIDEO_PATH" ]] && [[ -d "\$TEST_PATH" ]]; then
+                    echo "✅ Rendering completed successfully! Video and test folders created."
+                    RENDER_SUCCESS=true
+                    break
+                else
+                    echo "⚠️  Rendering command succeeded but folders missing. Retrying..."
+                    sleep 5
+                fi
+            else
+                echo "❌ Rendering attempt \$attempt failed. Exit code: \$?"
+                if [[ \$attempt -lt 3 ]]; then
+                    echo "🔄 Retrying in 10 seconds..."
+                    sleep 10
+                fi
+            fi
+        done
+        
+        if [[ "\$RENDER_SUCCESS" == "true" ]]; then
+            echo "RENDERING_DONE|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
+            
+            # Additional validation - check for video file
+            VIDEO_FILE="\$VIDEO_PATH/ours_80000/video_rgb.mp4"
+            if [[ -f "\$VIDEO_FILE" ]]; then
+                echo "✅ Video file confirmed: \$VIDEO_FILE"
+            else
+                echo "⚠️  Video file not found at expected location: \$VIDEO_FILE"
+            fi
+            
+            # Check test folder contents
+            TEST_RENDERS="\$TEST_PATH/ours_80000/renders"
+            if [[ -d "\$TEST_RENDERS" ]]; then
+                NUM_TEST_IMAGES=\$(ls "\$TEST_RENDERS"/*.png 2>/dev/null | wc -l)
+                echo "✅ Test folder contains \$NUM_TEST_IMAGES rendered images"
+            else
+                echo "⚠️  Test renders folder not found: \$TEST_RENDERS"
+            fi
+        else
+            echo "❌ Rendering failed after 3 attempts!"
+            echo "RENDERING_FAILED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
+            exit 1
+        fi
     else
-        echo "❌ Rendering failed!"
-        echo "RENDERING_FAILED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
-        exit 1
+        echo "✅ Video and test folders already exist. Skipping rendering."
+        echo "RENDERING_SKIPPED|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
     fi
     
 EOF
@@ -690,13 +748,63 @@ else
                 echo ""
                 echo "🎨 Starting rendering..."
                 echo "========================================"
-                CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
                 
-                if [ $? -eq 0 ]; then
-                    echo "✅ Rendering completed successfully!"
+                # Check if video and test folders already exist (unless force_render is true)
+                VIDEO_PATH="$SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME/video"
+                TEST_PATH="$SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME/test"
+                
+                if [[ "$FORCE_RENDER" == "true" ]] || [[ ! -d "$VIDEO_PATH" ]] || [[ ! -d "$TEST_PATH" ]]; then
+                    echo "🔄 Rendering required - video or test folder missing or force_render enabled"
+                    
+                    # Try rendering with retry mechanism
+                    RENDER_SUCCESS=false
+                    for attempt in 1 2 3; do
+                        echo "🎬 Rendering attempt $attempt/3..."
+                        
+                        CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")
+                        
+                        if [ $? -eq 0 ]; then
+                            # Validate that required folders were created
+                            if [[ -d "$VIDEO_PATH" ]] && [[ -d "$TEST_PATH" ]]; then
+                                echo "✅ Rendering completed successfully! Video and test folders created."
+                                RENDER_SUCCESS=true
+                                break
+                            else
+                                echo "⚠️  Rendering command succeeded but folders missing. Retrying..."
+                                sleep 5
+                            fi
+                        else
+                            echo "❌ Rendering attempt $attempt failed. Exit code: $?"
+                            if [[ $attempt -lt 3 ]]; then
+                                echo "🔄 Retrying in 10 seconds..."
+                                sleep 10
+                            fi
+                        fi
+                    done
+                    
+                    if [[ "$RENDER_SUCCESS" == "true" ]]; then
+                        # Additional validation - check for video file
+                        VIDEO_FILE="$VIDEO_PATH/ours_80000/video_rgb.mp4"
+                        if [[ -f "$VIDEO_FILE" ]]; then
+                            echo "✅ Video file confirmed: $VIDEO_FILE"
+                        else
+                            echo "⚠️  Video file not found at expected location: $VIDEO_FILE"
+                        fi
+                        
+                        # Check test folder contents
+                        TEST_RENDERS="$TEST_PATH/ours_80000/renders"
+                        if [[ -d "$TEST_RENDERS" ]]; then
+                            NUM_TEST_IMAGES=$(ls "$TEST_RENDERS"/*.png 2>/dev/null | wc -l)
+                            echo "✅ Test folder contains $NUM_TEST_IMAGES rendered images"
+                        else
+                            echo "⚠️  Test renders folder not found: $TEST_RENDERS"
+                        fi
+                    else
+                        echo "❌ Rendering failed after 3 attempts!"
+                        exit 1
+                    fi
                 else
-                    echo "❌ Rendering failed!"
-                    exit 1
+                    echo "✅ Video and test folders already exist. Skipping rendering."
                 fi
             fi
             
