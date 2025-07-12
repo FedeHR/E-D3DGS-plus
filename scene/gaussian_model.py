@@ -9,6 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+# TODO: try out gradient clipping for the gaussian embedding 
+
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
@@ -22,6 +24,7 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
 from scene.fourier_mapper import SimpleFourierMapper
+from utils.simple_embedding_init import initialize_gaussian_embeddings
 
 
 class GaussianModel:
@@ -49,6 +52,9 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
 
         self._xyz = torch.empty(0)
+        
+        # Store embedding initialization method
+        self.gaussian_embedding_init = getattr(args, 'gaussian_embedding_init', 'zero')
         
         # Initialize Fourier mapping for embedding initialization if enabled
         self.use_fourier_embedding_init = getattr(args, 'use_fourier_embedding_init', False)
@@ -170,7 +176,14 @@ class GaussianModel:
     
     @property
     def get_embedding(self):
-        # TODO not clear if the embedding should be the transformed or not when retrieving it
+        """
+        Get embeddings for use in the deformation network.
+        
+        When use_fourier_embedding_transform is enabled:
+        - _embedding stores the learnable embeddings (e.g., 32-dim)
+        - This property applies Fourier transform on-demand (e.g., to 32-dim)
+        - The transformation happens only when embeddings are accessed, not during storage
+        """
         if self.use_fourier_embedding_transform:
             return self.fourier_mapper_transform(self._embedding)
         else:
@@ -202,7 +215,7 @@ class GaussianModel:
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         
-        # Initialize embeddings with Fourier features if enabled, otherwise use zeros
+        # Initialize embeddings with Fourier features if enabled, otherwise use specified initialization method
         if self.use_fourier_embedding_init:
             # Move Fourier mapper to CUDA first
             self.fourier_mapper_init = self.fourier_mapper_init.to("cuda")
@@ -211,8 +224,15 @@ class GaussianModel:
                 embedding = self.fourier_mapper_init(fused_point_cloud).float()
             print(f"Initialized embeddings with Fourier features: {embedding.shape}")
         else:
-            # Use the embedding dimension (which is the input to any potential Fourier transform)
-            embedding = torch.zeros((fused_color.shape[0], self.embedding_dim)).float().cuda()
+            # Use the specified initialization method from simple_embedding_init
+            embedding = initialize_gaussian_embeddings(
+                positions=fused_point_cloud,
+                embedding_dim=self.embedding_dim,
+                init_type=self.gaussian_embedding_init,
+                device="cuda"
+            )
+            print(f"Initialized embeddings with '{self.gaussian_embedding_init}' method: {embedding.shape}")
+            
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda")

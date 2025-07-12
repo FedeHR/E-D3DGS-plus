@@ -95,6 +95,11 @@ class ModelHiddenParams(ParamGroup):
         self.use_anneal=True
         self.zero_temporal=False
         
+        # Gaussian embedding initialization method
+        # Note: When using use_fourier_embedding_transform, avoid 'zero' initialization 
+        # as it would result in non-informative transformed embeddings
+        self.gaussian_embedding_init='zero'
+        
         # Fourier mapping parameters for embedding initialization
         self.use_fourier_embedding_init=False
         self.fourier_frequencies=4

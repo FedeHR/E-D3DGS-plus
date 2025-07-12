@@ -100,6 +100,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     sampled_frame_no = None
     prev_num_pts = 0
 
+    # # Custom additions for debugging
+    # unstable_states = set()
+    # prev_gaussians_count = 0
+
     # We sort training images to sample image of the desired camera number and frame.
     if dataset.loader not in ['nerfies']:
         train_cams = sorted(train_cams, key=lambda x: (x.cam_no, x.frame_no))
@@ -219,6 +223,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
         
         loss.backward()
+        
+        # # Custom addition for debugging: Print deformation network gradients
+        # if iteration % 100 == 0:
+        #     print(f"\n[ITER {iteration}] Deformation network gradients:")
+        #     gaussians.print_deformation_weight_grad()
+
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
         for idx in range(0, len(viewspace_point_tensor_list)):
             viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_list[idx].grad
@@ -273,7 +283,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
-  
+
+                # # Custom addition for debugging: Detect unstable states before pruning
+                # prev_gaussians_count = detect_unstable_state(gaussians, iteration, opt, scene, prev_gaussians_count, unstable_states)
+
                 opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
                 densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
 
@@ -299,6 +312,46 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 
+# Might be later used for debugging
+# def detect_unstable_state(gaussians, iteration, opt, scene, prev_gaussians_count, unstable_states):
+#     """
+#     Detects unstable training states by monitoring for a significant drop in the number of Gaussians.
+#     If an unstable state is detected, it saves a checkpoint of the model state *before* the drop.
+#     """
+#     # Check if pruning is scheduled for this iteration
+#     is_pruning_iteration = (iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0)
+    
+#     if is_pruning_iteration:
+#         # Clone the current Gaussian model state before pruning
+#         pre_prune_capture = gaussians.capture()
+        
+#         # Temporarily apply pruning to a copy to check the outcome
+#         gaussians_clone = GaussianModel(gaussians.max_sh_degree, gaussians._deformation.args)
+#         gaussians_clone.restore(pre_prune_capture, opt)
+        
+#         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+#         densify_threshold = opt.densify_grad_threshold_fine_init - iteration * (opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after) / opt.densify_until_iter
+#         opacity_threshold = opt.opacity_threshold_fine_init - iteration * (opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after) / opt.densify_until_iter
+        
+#         gaussians_clone.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+        
+#         current_gaussians_count = gaussians_clone.get_xyz.shape[0]
+        
+#         # Check for a significant drop in Gaussians (e.g., >10%)
+#         if current_gaussians_count < prev_gaussians_count * 0.9 and iteration not in unstable_states:
+#             print(f"\n[ITER {iteration}] Detected a potential drop in Gaussians from {prev_gaussians_count} to {current_gaussians_count}.")
+#             print(f"Saving a pre-prune checkpoint...")
+            
+#             # Save the pre-prune state
+#             checkpoint_path = os.path.join(scene.model_path, f"chkpnt_pre_prune{iteration}.pth")
+#             torch.save((pre_prune_capture, iteration), checkpoint_path)
+#             unstable_states.add(iteration)
+        
+#         return current_gaussians_count
+    
+#     return prev_gaussians_count
+
+
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     tb_writer = prepare_output_and_logger(expname)
     
@@ -311,6 +364,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         "n_freq_emb": hyper.fourier_frequencies,
         "use_fourier_embedding_transform": hyper.use_fourier_embedding_transform,
         "use_fourier_init": hyper.use_fourier_embedding_init,
+        "gaussian_embedding_init": hyper.gaussian_embedding_init,
         "opacity_threshold_fine_init": opt.opacity_threshold_fine_init,
         "opacity_threshold_fine_after": opt.opacity_threshold_fine_after
     })
