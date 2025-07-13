@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.cpp_extension import load
 import torch.nn.init as init
-from utils.simple_embedding_init import initialize_temporal_embeddings
 
 
 class deform_network(nn.Module):
@@ -24,31 +23,33 @@ class deform_network(nn.Module):
         self.max_embeddings = max_embeddings
         self.num_frames = num_frames
         self.temporal_embedding_dim = args.temporal_embedding_dim
-        self.gaussian_embedding_dim = args.gaussian_embedding_dim
+        
+        # Determine Gaussian embedding dimension based on Fourier options
+        use_fourier_init = getattr(args, 'use_fourier_embedding_init', False)
+        use_fourier_transform = getattr(args, 'use_fourier_embedding_transform', False)
+
+        if use_fourier_init or use_fourier_transform:
+            fourier_frequencies = getattr(args, 'fourier_frequencies')
+            self.gaussian_embedding_dim = 2 * fourier_frequencies  # Fourier output dimension
+        else:
+            self.gaussian_embedding_dim = args.gaussian_embedding_dim
+            
         self.c2f_temporal_iter = args.c2f_temporal_iter
+        
+        # Calculate input dimension for the MLP: temporal + gaussian embeddings
+        self.input_dim = self.temporal_embedding_dim + self.gaussian_embedding_dim
 
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
         self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net()
 
-        # Initialize temporal embeddings with comprehensive scientific methods
-        temporal_init_type = getattr(args, 'temporal_embedding_init', 'normal')
-        if getattr(args, 'zero_temporal', False):
-            temporal_init_type = 'zero'
-        
-        print(f"🕒 Temporal Embedding Initialization: {temporal_init_type} (dim: {self.temporal_embedding_dim})")
-        
-        temporal_embeddings = initialize_temporal_embeddings(
-            num_frames=max_embeddings,
-            embedding_dim=self.temporal_embedding_dim,
-            init_type=temporal_init_type,
-            device='cuda',
-            scale=1.0
-        )
-        self.weight = torch.nn.Parameter(temporal_embeddings)
+        if args.zero_temporal:
+            self.weight = torch.nn.Parameter(torch.zeros(max_embeddings, self.temporal_embedding_dim))
+        else:
+            self.weight = torch.nn.Parameter(torch.normal(0., 0.01/np.sqrt(self.temporal_embedding_dim),size=(max_embeddings, self.temporal_embedding_dim)))
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
     def create_net(self):
-        self.feature_out = [nn.Linear(self.temporal_embedding_dim + self.gaussian_embedding_dim, self.W)]
+        self.feature_out = [nn.Linear(self.input_dim, self.W)]
         
         for i in range(self.D-1):
             self.feature_out.append(nn.ReLU())
@@ -91,6 +92,7 @@ class deform_network(nn.Module):
             else:
                 h = self.get_temporal_embed(t, self.int_lininterp(iter, num_down_emb, self.max_embeddings, self.c2f_temporal_iter))
     
+        # Get Gaussian embeddings (now potentially initialized with Fourier features or transformed through Fourier mapping)
         if type(pc) == type(None):
             h = torch.cat([h, embeddings], dim=-1)
         else:        

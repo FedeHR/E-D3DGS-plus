@@ -56,11 +56,11 @@ source bin/setup_wandb_team.sh
 # Custom embedding dimensions
 ./bin/run_experiment.sh --scene cut_roasted_beef --gdim 64 --tdim 512
 
-# Enable Fourier features
-./bin/run_experiment.sh --scene cut_roasted_beef --fourier_scale 2.0
+# Enable Fourier initialization
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 4
 
-# Full custom experiment
-./bin/run_experiment.sh --scene vrig-chicken --gdim 16 --fourier_scale 4.0
+# Full custom experiment with Fourier features
+./bin/run_experiment.sh --scene vrig-chicken --gdim 16 --use_fourier_embedding_init --fourier_frequencies 8 --use_amplitude_coefficients
 ```
 
 **Execution Options:**
@@ -87,266 +87,197 @@ source bin/setup_wandb_team.sh
 | `--scene` | - | Scene name (auto-detects dataset) | **Required** - determines dataset and scene |
 | `--gdim` | 32 | Gaussian embedding dimension | Model capacity and spatial detail |
 | `--tdim` | 256 | Temporal embedding dimension | Temporal modeling capability |
-| `--fourier_scale` | 0 | Fourier features scale (0=disabled) | Spatial frequency enhancement |
-| `--embedding_init` | zero | Gaussian embedding initialization (see methods below) | Training convergence & spatial detail |
-| `--temporal_embedding_init` | normal | Temporal embedding initialization | Temporal modeling stability |
-| `--num_freq_bands` | auto | Frequency bands for structured Fourier | Frequency coverage range |
+| `--gaussian_embedding_init` | zero | Basic embedding initialization | Training convergence baseline |
+| `--use_fourier_embedding_init` | false | Enable Fourier initialization | **NEW** - Spatial frequency enhancement |
+| `--fourier_frequencies` | 4 | Number of Fourier frequency bands | Frequency resolution control |
+
+| `--use_amplitude_coefficients` | false | Learnable amplitude coefficients | **NEW** - Adaptive frequency weighting |
+| `--use_fourier_embedding_transform` | false | Transform embeddings during forward pass | **NEW** - Advanced frequency processing |
 | `--gpu` | 0 | GPU device ID | Hardware selection |
 | `--resolution` | 2 | Resolution scaling factor | Training speed vs quality |
 | `--time` | auto | Custom time limit (HH:MM:SS format) | SLURM job duration control |
+
+### 🔄 **Parameter Conversion & Interface**
+
+**User Interface → Training Command:**
+The experiment runner provides a user-friendly interface that automatically converts parameters:
+
+```bash
+# User interface (what you type):
+./bin/run_experiment.sh --scene cut_roasted_beef --gdim 32 --tdim 256
+
+# Training command (what actually runs):
+python train.py --gaussian_embedding_dim 32 --temporal_embedding_dim 256 ...
+```
+
+**Key conversions:**
+- `--gdim` → `--gaussian_embedding_dim`
+- `--tdim` → `--temporal_embedding_dim`
+- Scene name → Dataset type auto-detection
+- Automatic SLURM script generation and job submission
+
+### 🏷️ **Experiment Naming Scheme**
+
+**Naming Convention:**
+```bash
+# Pattern: {scene}-gdim{N}-tdim{M}-{method}
+cut_roasted_beef-gdim32-tdim256-xavier                    # Normal embeddings
+cut_roasted_beef-gdim32-tdim256-fourier4                  # Fourier init with 4 frequencies
+cut_roasted_beef-gdim32-tdim256-fouriertransform8         # Fourier transform with 8 frequencies
+```
+
+**What the names mean:**
+- `gdim32`: Gaussian embedding dimension = 32 (user interface parameter)
+- `tdim256`: Temporal embedding dimension = 256
+- `fourier4`: Fourier initialization with 4 frequencies → 8D embeddings (2×4)
+- `fouriertransform8`: Fourier transform with 8 frequencies → 16D transform output (2×8)
+
+**Important:** The naming shows user interface parameters, but the actual training uses the converted parameters (`gaussian_embedding_dim`, etc.).
 
 **Auto-detected Datasets:**
 - **DyNeRF**: coffee_martini, cook_spinach, cut_roasted_beef, flame_salmon_1, flame_steak, sear_steak
 - **HyperNeRF**: aleks-teapot, chickchicken, cut-lemon, hand, slice-banana, torchocolate, americano, cross-hands, espresso, keyboard, oven-mitts, split-cookie, tamping, 3dprinter, broom, vrig-chicken, peel-banana
 
-## 🧬 Comprehensive Embedding Initialization Methods
+## 🧬 Possible Initialization System
 
-Based on **"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"** (Tancik et al., NeurIPS 2020) and classical deep learning initialization strategies:
+This is the **system** for simple and fourier feature enhancement in E-D3DGS.
 
-### 🎯 Classical Methods
+### 🎯 Key Features
+
+Based on **"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"** (Tancik et al., NeurIPS 2020), with optimizations for 3D Gaussian Splatting:
+
+### 🎯 Basic Embedding Initialization (--gaussian_embedding_init)
 - **`zero`** (default): Zero initialization - stable baseline, good for ablations
-- **`normal`**: Standard normal distribution N(0,0.01²) - basic random initialization  
-- **`random`**: Alias for normal initialization
+- **`random/normal`**: Standard normal distribution N(0,0.01²) - basic random initialization  
 - **`uniform`**: Uniform distribution U(-0.01,0.01) - bounded random initialization
-
-### ⚖️ Xavier/Glorot Family (Better Gradient Flow)
-- **`xavier`**: Xavier normal initialization - recommended for linear/tanh activations
-- **`xavier_normal`**: Same as xavier (explicit naming)
-- **`xavier_uniform`**: Xavier uniform variant - sometimes more stable
-
-### 🎢 Kaiming/He Family (ReLU Networks)
+- **`xavier`**: Xavier normal initialization - recommended for better gradient flow
 - **`kaiming`**: Kaiming normal initialization - optimal for ReLU networks
-- **`kaiming_normal`**: Same as kaiming (explicit naming) 
-- **`he_normal`**: Same as kaiming_normal (alternative naming)
-- **`he_uniform`**: He uniform variant - for ReLU activations
 
-### 🌊 Fourier & Positional Encoding Methods (High-Frequency Spatial Details)
+### 🌊 Fourier Initialization System (--use_fourier_embedding_init)
 
-These methods enable neural networks to learn high-frequency functions by mapping coordinates to higher-dimensional feature spaces. Based on **"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains"** (Tancik et al., NeurIPS 2020).
+**Core Concept**: Instead of random embeddings, initialize with Fourier-mapped xyz coordinates for better spatial frequency representation from the start.
 
-#### 🎯 Random Fourier Features (`fourier`, `positional`)
-**What it does**: Maps 3D coordinates (x,y,z) through random frequency projections
-**Formula**: `γ(p) = [cos(2πB₁·p), sin(2πB₁·p), ..., cos(2πBₘ·p), sin(2πBₘ·p)]`
+#### 🎯 How It Works
 
-**Parameters:**
-- `--fourier_scale`: Controls frequency range [0, scale] (higher = more detail)
-- No `--num_freq_bands` needed (auto-calculated from dimension)
+**Formula**: `γ(p) = [a₁·cos(2πB₁·p), a₁·sin(2πB₁·p), ..., aₘ·cos(2πBₘ·p), aₘ·sin(2πBₘ·p)]`
 
-**Dimension mapping:**
-- **16D**: 8 random frequency vectors → broad frequency coverage
-- **32D**: 16 random frequency vectors → denser frequency sampling  
-- **64D**: 32 random frequency vectors → very dense sampling
+Where:
+- `p` = 3D Gaussian coordinates (x,y,z)
+- `B` = Random frequency matrix (fixed, sampled from N(0,1))
+- `a` = Optional learnable amplitude coefficients
 
-**Best for**: General scenes where you want better spatial detail than normal embeddings
+**Key Parameters:**
+- `--fourier_frequencies N`: Number of frequency bands (default: 4)
 
-#### 🏗️ Structured Fourier / NeRF Positional Encoding (`structured_fourier`, `positional_encoding`)
-**What it does**: Uses deterministic powers-of-2 frequencies like NeRF
-**Formula**: `γ(p) = [p, sin(2⁰πp), cos(2⁰πp), sin(2¹πp), cos(2¹πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp)]`
+- `--use_amplitude_coefficients`: Enable learnable amplitude scaling
 
-**Parameters:**
-- `--fourier_scale`: Base frequency (default: 1.0)
-- `--num_freq_bands`: Number of frequency bands (auto-calculated if not specified)
+**Dimension Output:**
+- **4 frequencies**: 8D output (2 × 4 frequencies)
+- **8 frequencies**: 16D output (2 × 8 frequencies)  
+- **16 frequencies**: 32D output (2 × 16 frequencies)
 
-**Dimension mapping & frequency ranges:**
-- **16D**: ~2 freq bands → [scale, 2×scale] (e.g., [1.0, 2.0])
-- **32D**: ~5 freq bands → [scale, 16×scale] (e.g., [1.0, 16.0])
-- **64D**: ~10 freq bands → [scale, 512×scale] (e.g., [1.0, 512.0])
+**Input Dimension Experiments:**
+- **3D input (default)**: Full xyz coordinate mapping
+- **2D input**: xy-only mapping (for planar scenes)
+- **1D input**: Single coordinate experiments
 
-**Best for**: Scenes with predictable frequency content, systematic ablations
+**Best for**: Scenes with fine spatial details, textures, and geometric complexity
 
-#### 🧠 Learned Fourier Features (`learned_fourier`)
-**What it does**: Initializes with structured random frequencies but allows learning
-**Features**: Multi-scale initialization (1/3 low, 1/3 medium, 1/3 high frequencies)
+#### 🔄 Advanced: Fourier Embedding Transform (--use_fourier_embedding_transform)
 
-**Parameters:**
-- `--fourier_scale`: Controls initial frequency distribution
-- No `--num_freq_bands` needed
+**Core Concept**: Apply Fourier transformation to embeddings **during the forward pass** instead of just at initialization.
 
-**Best for**: Complex scenes where optimal frequencies are unknown
+**🔑 KEY DIFFERENCE from Fourier Init:**
+- **`--use_fourier_embedding_init`**: Embedding dimension is **automatically** set to `2 × fourier_frequencies` (gdim parameter is ignored)
+- **`--use_fourier_embedding_transform`**: Embedding dimension can be **independently specified** via `--gdim` parameter
 
-### 🕒 Temporal-Specific Methods
-- **`sinusoidal`**: Transformer-style positional encoding for time (temporal embeddings only)
+**Parameter Conversion:**
+- User interface: `--gdim 32` → Training command: `--gaussian_embedding_dim 32`
+- The `--gdim` parameter is a user-friendly interface that gets converted to `--gaussian_embedding_dim` in the actual training command
 
-### 📊 **CRITICAL: Fourier vs Normal Embedding Dimension Trade-offs**
+**When to use:**
+- Want to maintain standard embedding initialization but add frequency enhancement
+- Need independent control over embedding dimension and frequency count
+- Want to experiment with different combinations of embedding dimensions and frequencies
 
-This is key for understanding how to choose parameters:
+**Performance Impact:**
+- Slightly more computational cost during forward pass
+- Better high-frequency learning capability
+- Can be combined with `--use_fourier_embedding_init` for dual enhancement
 
-#### 🔍 **Frequency Coverage vs Embedding Dimension**
 
-**Random Fourier (`fourier`) vs Normal Embeddings:**
+### 📊 **Example Fourier Modes and Dimension Control**
+
+#### 🔍 **Two Distinct Fourier Modes**
+
+**Mode 1: Fourier Embedding Init (`--use_fourier_embedding_init`)**
 ```bash
-# These provide roughly equivalent model capacity:
---embedding_init fourier --fourier_scale 2.0 --gdim 16  # 8 freq mappings
---embedding_init xavier --gdim 16                        # 16 normal dimensions
+# Embedding dimension is AUTOMATICALLY determined by frequencies
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 4
+# → Creates 8D embeddings (2 × 4 frequencies)
+# → gdim parameter is IGNORED in this mode
 
-# But Fourier has better high-frequency representation!
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 8  
+# → Creates 16D embeddings (2 × 8 frequencies)
+
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 16
+# → Creates 32D embeddings (2 × 16 frequencies)
 ```
 
-**Structured Fourier (`structured_fourier`) vs Normal:**
+**Mode 2: Fourier Embedding Transform (`--use_fourier_embedding_transform`)**
 ```bash
-# Low-frequency focused (good for smooth scenes):
---embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 3 --gdim 32
-# Covers frequencies [1.0, 2.0, 4.0] = 3×6+3 = 21 effective dims
+# Embedding dimension can be specified INDEPENDENTLY
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 8 --fourier_frequencies 4
+# → Stores 8D embeddings, transforms to 8D during forward pass (2 × 4 frequencies)
 
-# High-frequency focused (good for detailed scenes):  
---embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 8 --gdim 64
-# Covers frequencies [1.0, 2.0, 4.0, ..., 128.0] = 8×6+3 = 51 effective dims
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 16 --fourier_frequencies 4  
+# → Stores 16D embeddings, transforms to 8D during forward pass (2 × 4 frequencies)
 
-# Equivalent normal embedding:
---embedding_init xavier --gdim 64  # 64 normal dimensions (less structured)
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 32 --fourier_frequencies 8
+# → Stores 32D embeddings, transforms to 16D during forward pass (2 × 8 frequencies)
 ```
 
-#### ⚖️ **How to Choose: Fourier Bands vs Higher Dimensions**
+#### ⚖️ **Equivalent Capacity Comparisons**
 
-**For the SAME computational cost, you can choose:**
-
-**Option A: More Fourier Frequency Bands (Structured)**
+**Same effective output dimension:**
 ```bash
---embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 10 --gdim 64
+# All create 16D outputs for the deformation network:
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 8
+# → 16D embeddings (automatic)
+
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 8 --fourier_frequencies 8  
+# → 8D stored → 16D transformed
+
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 32 --fourier_frequencies 8
+# → 32D stored → 16D transformed
+
+./bin/run_experiment.sh --scene cut_roasted_beef --gaussian_embedding_init xavier --gdim 16
+# → 16D normal embeddings (baseline)
 ```
-- **Pros**: Explicit frequency control, interpretable, good for known detail levels
-- **Cons**: Fixed frequency structure, may miss optimal frequencies
 
-**Option B: Higher Normal Embedding Dimension**
-```bash
---embedding_init xavier --gdim 64
-```
-- **Pros**: Maximum flexibility, can learn any frequency, adaptive
-- **Cons**: Less interpretable, may struggle with high frequencies initially
+### 🎯 Practical Decision Guidelines
 
-**Option C: Random Fourier with Higher Scale**
-```bash
---embedding_init fourier --fourier_scale 4.0 --gdim 64
-```
-- **Pros**: Random frequency sampling, good high-freq initialization, flexible
-- **Cons**: Non-deterministic, less controlled than structured
-
-#### 🎯 **Practical Decision Guidelines**
-
-**Use Higher `num_freq_bands` when:**
-- You know the scene has specific detail scales
-- You want interpretable frequency control
+**Use Fourier Embedding Init when:**
+- You want automatic embedding dimension based on frequency count
 - You're doing systematic frequency ablations
-- Scene has obvious geometric detail levels
+- You want the simplest fourier enhancement
+- You don't need custom embedding dimensions
 
-**Use Higher `gdim` (normal embeddings) when:**
-- Scene complexity is unknown
-- You want maximum model flexibility  
-- You prefer simple, well-tested initialization
-- Computational cost is not a constraint
+**Use Fourier Embedding Transform when:**
+- You want independent control over embedding dimension and frequencies
+- You're doing grid searches across embedding dimensions
+- You want to store embeddings in one dimension but transform to another
+- You're combining with other embedding initialization methods
 
-**Use Random Fourier (`fourier`) when:**
-- You want better high-frequency capability than normal
-- You want some frequency benefits without manual tuning
-- You're prototyping or want good general performance
-
-#### 📐 **Memory & Speed Considerations**
-
-All methods have the same computational cost for the same `gdim`, but:
-- **Fourier methods**: Better gradient flow for high-frequency details
-- **Normal embeddings**: Slightly faster initialization
-- **Structured Fourier**: Most interpretable results
-
-### 🔬 Recommended Configurations & Comparisons
-
-#### 🎯 **High-Detail Scenes** (cook_spinach, cut_roasted_beef, flame_salmon)
-```bash
-# Option A: Random Fourier (balanced performance)
---embedding_init fourier --fourier_scale 2.0 --gdim 32
-
-# Option B: Structured Fourier (interpretable frequencies)  
---embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 8 --gdim 64
-
-# Option C: High-dimension normal (maximum flexibility)
---embedding_init xavier --gdim 64
-```
-
-#### ⚡ **Fast Prototyping & Development**
-```bash
-# Minimal setup (fastest training)
---embedding_init xavier --gdim 16 --tdim 128
-
-# Balanced setup (good quality/speed)
---embedding_init kaiming --gdim 32 --tdim 256
-
-# Quick Fourier test (better detail than normal)
---embedding_init fourier --fourier_scale 1.0 --gdim 32
-```
-
-#### 🕒 **Temporal Stability & Motion Modeling**
-```bash
-# Smooth temporal transitions
---temporal_embedding_init sinusoidal --tdim 256
-
-# Better gradient flow for temporal features
---temporal_embedding_init xavier --tdim 512
-
-# Large temporal capacity for complex motion
---temporal_embedding_init xavier --tdim 1024
-```
-
-#### 🔬 **Scientific Experiments & Ablations**
-
-**Initialization Method Comparison:**
-```bash
-# Baseline (standard approach)
---embedding_init zero --gdim 32
-
-# Better gradient flow
---embedding_init xavier --gdim 32   
-
-# High-frequency capability
---embedding_init fourier --fourier_scale 2.0 --gdim 32
-
-# Structured frequency analysis
---embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 5 --gdim 32
-```
-
-**Frequency Band Analysis (structured_fourier):**
-```bash
-# Low frequency focus (smooth scenes)
---embedding_init structured_fourier --num_freq_bands 3 --gdim 32
-
-# Medium frequency focus (balanced)
---embedding_init structured_fourier --num_freq_bands 6 --gdim 32  
-
-# High frequency focus (detailed scenes)
---embedding_init structured_fourier --num_freq_bands 10 --gdim 64
-```
-
-**Equivalent Capacity Comparisons:**
-```bash
-# ~16 effective dimensions - test which works better:
---embedding_init xavier --gdim 16                         # Normal baseline
---embedding_init fourier --fourier_scale 1.0 --gdim 16   # Random Fourier
---embedding_init structured_fourier --num_freq_bands 2 --gdim 16  # Structured
-
-# ~32 effective dimensions:  
---embedding_init xavier --gdim 32                         # Normal baseline
---embedding_init fourier --fourier_scale 2.0 --gdim 32   # Random Fourier
---embedding_init structured_fourier --num_freq_bands 5 --gdim 32  # Structured
-```
-
-#### 🎮 **Quick Scene-Specific Recommendations**
-
-**Smooth Scenes** (vrig-chicken, hand):
-```bash
---embedding_init xavier --gdim 32 --temporal_embedding_init sinusoidal
-```
-
-**Detailed/Textured Scenes** (cook_spinach, cut_roasted_beef):
-```bash
---embedding_init fourier --fourier_scale 2.0 --gdim 64
-```
-
-**Fast-Moving Scenes** (flame_salmon, sear_steak):
-```bash
---embedding_init structured_fourier --num_freq_bands 8 --gdim 64 --temporal_embedding_init xavier --tdim 512
-```
+**Use Normal Embeddings when:**
+- You want maximum model flexibility
+- You prefer simple, well-tested approaches
+- You're establishing baselines for comparison
+- Memory/speed is not a major constraint
 
 ## 📊 Enhanced Wandb Tracking & Metrics
 
-### 🖼️ **NEW: Visual Progress Tracking**
+### 🖼️ **Visual Progress Tracking**
 
 **Real vs Generated Image Comparison:**
 - **Frequency**: Every 1000 iterations during test evaluation
@@ -1080,7 +1011,7 @@ for gdim in 4 8 16 32 64; do
 done
 ```
 
-**💡 The `wandb/` folder is your local experiment database** - use it for detailed analysis, debugging, and ensuring complete reproducibility of your E-D3DGS research! 🚀
+**💡 The `wandb/` folder is your local experiment database** - use it for detailed analysis, debugging, and ensuring complete reproducibility of your E-D3DGS research! 🚀 
 
 ## 🚨 Troubleshooting
 
@@ -1116,21 +1047,28 @@ done
 # Basic experiment (original defaults)
 ./bin/run_experiment.sh --scene cut_roasted_beef
 
-# Custom experiment with Fourier features  
-./bin/run_experiment.sh --scene vrig-chicken --gdim 16 --fourier_scale 2.0
+# Custom experiment with Fourier features (correct usage)
+./bin/run_experiment.sh --scene vrig-chicken --use_fourier_embedding_init --fourier_frequencies 8
+# → Creates 16D embeddings automatically (gdim ignored)
 
 # Scientific comparison: Different initialization methods
-./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init xavier --gdim 32
-./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init fourier --fourier_scale 2.0 --gdim 32
-./bin/run_experiment.sh --scene cut_roasted_beef --embedding_init structured_fourier --fourier_scale 1.0 --num_freq_bands 5 --gdim 32
+./bin/run_experiment.sh --scene cut_roasted_beef --gaussian_embedding_init xavier --gdim 32
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_init --fourier_frequencies 16
+# → Creates 32D embeddings automatically (2 × 16 frequencies)
 
-# Frequency band ablation study
-./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 3 --gdim 32
-./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 6 --gdim 32
-./bin/run_experiment.sh --scene cook_spinach --embedding_init structured_fourier --num_freq_bands 10 --gdim 64
+# Fourier transform with independent control
+./bin/run_experiment.sh --scene cut_roasted_beef --use_fourier_embedding_transform --gdim 16 --fourier_frequencies 8
+# → Stores 16D embeddings, transforms to 16D during forward pass
 
-# Temporal stability experiment
-./bin/run_experiment.sh --scene vrig-chicken --temporal_embedding_init sinusoidal --tdim 512
+# Grid experiments with fourier transform
+./bin/run_experiment.sh --scene cook_spinach --use_fourier_embedding_transform --gdim 8 --fourier_frequencies 4
+./bin/run_experiment.sh --scene cook_spinach --use_fourier_embedding_transform --gdim 16 --fourier_frequencies 4
+./bin/run_experiment.sh --scene cook_spinach --use_fourier_embedding_transform --gdim 32 --fourier_frequencies 4
+# → All use 4 frequencies (8D transform output) but different storage dimensions
+
+# Advanced fourier experiments
+./bin/run_experiment.sh --scene vrig-chicken --use_fourier_embedding_init --use_fourier_embedding_transform --fourier_frequencies 8 --use_amplitude_coefficients
+# → Fourier init determines embedding dimension, transform applies during forward pass
 
 # Local execution for debugging
 ./bin/run_experiment.sh --scene cut_roasted_beef --no_slurm

@@ -38,6 +38,17 @@ import wandb
 # Import LPIPS for evaluation
 from lpipsPyTorch import lpips
 
+# Global LPIPS model for evaluation (initialized once)
+_lpips_model = None
+
+def get_lpips_model():
+    """Get or initialize the LPIPS model (singleton pattern)"""
+    global _lpips_model
+    if _lpips_model is None:
+        import lpips as lpips_module
+        _lpips_model = lpips_module.LPIPS(net='vgg').cuda()
+    return _lpips_model
+
 
 def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
     """Evaluate on test cameras and return metrics, with enhanced wandb image logging"""
@@ -132,6 +143,113 @@ def evaluate_test_cameras(gaussians, scene, pipe, background, iteration):
         'test/SSIM': np.mean(test_ssims),
         'test/LPIPS': np.mean(test_lpips_scores)
     }
+
+
+def evaluate_comprehensive(scene, gaussians, pipe, background, iteration, tb_writer, hyper):
+    """
+    Comprehensive evaluation on test and train sets, computing L1, PSNR, SSIM, and LPIPS metrics.
+    """
+    torch.cuda.empty_cache()
+    log_gen_images, log_real_images = [], []
+    
+    # Get the LPIPS model (initialized once for efficiency)
+    lpips_model = get_lpips_model()
+    
+    validation_configs = [
+        {
+            'name': 'test', 
+            'cameras': scene.getTestCameras(), 
+            'cam_idx': 0  # Index of camera to log images from
+        },
+        {
+            'name': 'train',
+            # Reduced cameras from 150 to 20 cameras to save memory
+            'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(0, min(20, len(scene.getTrainCameras())), 5)], 
+            'cam_idx': min(3, len(scene.getTrainCameras()) - 1) if len(scene.getTrainCameras()) > 0 else 0
+        }
+    ]
+    
+    # Log number of Gaussians
+    wandb.log({"Number of Gaussians": len(gaussians._xyz.detach().cpu())}, step=iteration)
+    
+    for config in validation_configs:
+        if config['cameras'] and len(config['cameras']) > 0:
+            l1_test = 0.0
+            psnr_test = 0.0
+            ssim_test = 0.0
+            lpips_test = 0.0
+            
+            for idx, viewpoint in enumerate(config['cameras']):
+                # Load image if needed (for lazy loading)
+                if hasattr(viewpoint, 'original_image') and viewpoint.original_image is None:
+                    if hasattr(viewpoint, 'load_image'):
+                        viewpoint.load_image()
+                
+                # Get camera number for render call
+                cam_no = viewpoint.cam_no if hasattr(viewpoint, 'cam_no') else 0
+                
+                # Render image with all necessary parameters
+                render_pkg = render(viewpoint, gaussians, pipe, background, 
+                                  cam_no=cam_no, iter=iteration,
+                                  num_down_emb_c=hyper.min_embeddings, 
+                                  num_down_emb_f=hyper.min_embeddings)
+                image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                gt_image = torch.clamp(viewpoint.original_image.cuda(), 0.0, 1.0)
+                
+                # Compute metrics
+                l1_test += l1_loss(image, gt_image).double()
+                psnr_test += psnr(image.unsqueeze(0), gt_image.unsqueeze(0)).double()
+                ssim_value, _ = ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+                ssim_test += ssim_value.double()
+                lpips_test += lpips_model(image, gt_image).detach().double()
+                
+                # Collect images for logging
+                if idx == config['cam_idx']:
+                    log_gen_images.append(image)
+                    log_real_images.append(gt_image)
+                
+                # Clear intermediate tensors every few iterations to prevent memory buildup
+                if idx % 5 == 0:
+                    torch.cuda.empty_cache()
+            
+            # Average metrics
+            num_cameras = len(config['cameras'])
+            l1_test /= num_cameras
+            psnr_test /= num_cameras
+            ssim_test /= num_cameras
+            lpips_test /= num_cameras
+            
+            # Log metrics
+            wandb.log({
+                f"{config['name']}/L1": l1_test.detach().cpu().item(),
+                f"{config['name']}/PSNR": psnr_test.detach().cpu().item(),
+                f"{config['name']}/SSIM": ssim_test.detach().cpu().item(),
+                f"{config['name']}/LPIPS": lpips_test.detach().cpu().item()
+            }, step=iteration)
+            
+            # Print results
+            print(f"\n[ITER {iteration}], #{len(gaussians._xyz)} gaussians, Evaluating {config['name']}: "
+                  f"L1={l1_test.item():.6f}, PSNR={psnr_test.item():.6f}, "
+                  f"SSIM={ssim_test.item():.6f}, LPIPS={lpips_test.item():.6f}")
+        
+        # Added: clear memory between test and train evaluation
+        torch.cuda.empty_cache()
+    
+    # Log sample images
+    if log_gen_images and log_real_images:
+        # Convert images to numpy for wandb logging
+        real_img = log_real_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        gen_img = log_gen_images[0].detach().cpu().permute(1, 2, 0).numpy()
+        
+        wandb.log({
+            "Real Image": wandb.Image(real_img, caption="Real"),
+            "Generated Image": wandb.Image(gen_img, caption="Generated")
+        }, step=iteration)
+    else:
+        print(f"Warning: No images collected for logging at iteration {iteration}")
+    
+    # Final memory cleanup
+    torch.cuda.empty_cache()
 
 
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
@@ -352,12 +470,13 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 
                 wandb.log(wandb_metrics, step=iteration)
 
-            # Test evaluation every 1000 iterations
-            if iteration % 1000 == 0 and iteration > 0:
-                print(f"\n[ITER {iteration}] Running test evaluation...")
-                test_metrics = evaluate_test_cameras(gaussians, scene, pipe, background, iteration)
-                wandb.log(test_metrics, step=iteration)
-                print(f"Test metrics: PSNR={test_metrics['test/PSNR']:.2f}, SSIM={test_metrics['test/SSIM']:.3f}")
+            # Added comprehensive evaluation at regular intervals like teammate's version
+            if (iteration <= 3000 and iteration % 500 == 0) or \
+               (iteration > 3000 and iteration % 1000 == 0) or \
+               (iteration in testing_iterations):
+                timer.pause()
+                evaluate_comprehensive(scene, gaussians, pipe, background, iteration, tb_writer, hyper)
+                timer.start()
 
             # Log and save
             timer.pause()
@@ -455,6 +574,13 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         "use_fourier_features": getattr(dataset, 'use_fourier_features', False),
         "fourier_scale": getattr(dataset, 'fourier_scale', 1.0),
         
+        # NEW FOURIER SYSTEM PARAMETERS
+        "use_fourier_embedding_init": getattr(hyper, 'use_fourier_embedding_init', False),
+        "fourier_frequencies": getattr(hyper, 'fourier_frequencies', 4),
+        "fourier_input_dim": getattr(hyper, 'fourier_input_dim', 3),
+        "use_amplitude_coefficients": getattr(hyper, 'use_amplitude_coefficients', False),
+        "use_fourier_embedding_transform": getattr(hyper, 'use_fourier_embedding_transform', False),
+        
         # Training configuration
         "iterations": opt.iterations,
         "batch_size": opt.batch_size,
@@ -497,7 +623,24 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     if embedding_init != 'zero':
         tags.append(f"init_{embedding_init}")
     
-    # Add Fourier features tags
+    # Add NEW Fourier embedding initialization tags
+    if getattr(hyper, 'use_fourier_embedding_init', False):
+        fourier_freq = getattr(hyper, 'fourier_frequencies', 4)
+        fourier_input_dim = getattr(hyper, 'fourier_input_dim', 3)
+        tags.append(f"fourier_init_{fourier_freq}")
+        if fourier_input_dim != 3:
+            tags.append(f"fourier_dim_{fourier_input_dim}")
+        if getattr(hyper, 'use_amplitude_coefficients', False):
+            tags.append("fourier_amp")
+    
+    # Add Fourier embedding transform tags
+    if getattr(hyper, 'use_fourier_embedding_transform', False):
+        fourier_freq = getattr(hyper, 'fourier_frequencies', 4)
+        tags.append(f"fourier_transform_{fourier_freq}")
+        if getattr(hyper, 'use_amplitude_coefficients', False):
+            tags.append("fourier_transform_amp")
+    
+    # Add legacy Fourier features tags (for compatibility)
     if getattr(dataset, 'use_fourier_features', False) or embedding_init in ['fourier', 'structured_fourier']:
         fourier_scale = getattr(dataset, 'fourier_scale', 1.0)
         tags.append(f"fourier_{fourier_scale}")

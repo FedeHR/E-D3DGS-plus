@@ -57,9 +57,6 @@ class ModelParams(ParamGroup):
         self.render_process=False
         self.loader = "colmap"
         self.shuffle = True
-        # SIMPLIFIED EMBEDDINGS: Essential parameters only
-        self.fourier_scale = 1.0
-        self.use_fourier_features = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -92,16 +89,25 @@ class ModelHiddenParams(ParamGroup):
         self.no_coarse_deform=False
         self.no_fine_deform=False
         
-        # COMPREHENSIVE EMBEDDING INITIALIZATION OPTIONS
-        self.embedding_init = "zero"  # zero, random, uniform, xavier, xavier_uniform, kaiming, he_uniform, fourier, structured_fourier, learned_fourier, positional, positional_encoding
-        self.temporal_embedding_init = "normal"  # normal, zero, uniform, xavier, xavier_uniform, kaiming, he_uniform, sinusoidal
-        self.num_freq_bands = None  # Number of frequency bands for structured Fourier (auto-calculated if None)
-        
         self.total_num_frames=300
         self.c2f_temporal_iter=20000
         self.deform_from_iter=0
         self.use_anneal=True
         self.zero_temporal=False
+        
+        # Gaussian embedding initialization method
+        # Note: When using use_fourier_embedding_transform, avoid 'zero' initialization 
+        # as it would result in non-informative transformed embeddings
+        self.gaussian_embedding_init='zero'
+        
+        # Fourier mapping parameters for embedding initialization
+        self.use_fourier_embedding_init=False
+        self.fourier_frequencies=4
+        self.use_amplitude_coefficients=False
+        
+        # Fourier mapping parameters for whole embedding transformation
+        self.use_fourier_embedding_transform=False
+        
         super().__init__(parser, "ModelHiddenParams")
         
 class OptimizationParams(ParamGroup):

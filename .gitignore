@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 visualizations/
+old_repository/
 MANIFEST
 
 # Virtual environments

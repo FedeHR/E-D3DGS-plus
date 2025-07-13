@@ -10,11 +10,12 @@ set -e  # Exit on any error
 SCENE=""
 GDIM=32
 TDIM=256
-FOURIER_SCALE=0
-NUM_FREQ_BANDS=""
-EMBEDDING_INIT="zero"  # Changed to match current default
-TEMPORAL_EMBEDDING_INIT="normal"
-NUM_FREQ_BANDS=""  # Number of frequency bands for structured Fourier (auto-calculated if empty)
+# FOURIER SYSTEM PARAMETERS
+USE_FOURIER_EMBEDDING_INIT=false
+FOURIER_FREQUENCIES=4
+USE_AMPLITUDE_COEFFICIENTS=false
+USE_FOURIER_EMBEDDING_TRANSFORM=false
+GAUSSIAN_EMBEDDING_INIT="zero"
 GPU=0
 RESOLUTION=2
 SLURM=true  # Default to SLURM mode
@@ -121,14 +122,14 @@ Required:
 Model Parameters:
   --gdim DIM              Gaussian embedding dimension (default: 32)
   --tdim DIM              Temporal embedding dimension (default: 256)
-  --fourier_scale SCALE   Fourier features scale, 0=disabled (default: 0)
-  --num_freq_bands N      Number of frequency bands for structured Fourier (optional)
-  --embedding_init TYPE   Gaussian embedding initialization (default: zero)
-                          Options: zero, random, normal, xavier, xavier_uniform, xavier_normal,
-                                  kaiming, he_uniform, kaiming_normal, he_normal, uniform,
-                                  fourier, positional, structured_fourier, learned_fourier
-  --temporal_init TYPE    Temporal embedding initialization (default: normal)
-                          Options: zero, normal, random, xavier_uniform, xavier_normal, sinusoidal
+  --gaussian_embedding_init TYPE  Gaussian embedding initialization (default: zero)
+                                  Options: zero, random, normal, xavier, kaiming, uniform
+  
+  FOURIER SYSTEM:
+  --use_fourier_embedding_init    Initialize embeddings with fourier-mapped coordinates
+  --fourier_frequencies N         Number of fourier frequencies (default: 4) 
+  --use_amplitude_coefficients    Use learnable amplitude coefficients
+  --use_fourier_embedding_transform Transform embeddings during forward pass
 
 Training Options:
   --gpu GPU_ID            GPU to use (default: 0)
@@ -170,8 +171,11 @@ Examples:
   # Custom parameters
   $0 --scene cut_roasted_beef --gdim 64 --tdim 512
 
-  # Enable Fourier features
-  $0 --scene vrig-chicken --embedding_init fourier --fourier_scale 4.0
+  # Enable Fourier initialization
+  $0 --scene vrig-chicken --use_fourier_embedding_init --fourier_frequencies 4
+
+  # Fourier with amplitude coefficients
+  $0 --scene vrig-chicken --use_fourier_embedding_init --fourier_frequencies 8 --use_amplitude_coefficients
 
   # Use high-priority Abaki partition (auto-detects reservations)
   $0 --scene cut_roasted_beef --abakus
@@ -204,21 +208,25 @@ while [[ $# -gt 0 ]]; do
             TDIM="$2"
             shift 2
             ;;
-        --fourier_scale)
-            FOURIER_SCALE="$2"
+        --gaussian_embedding_init)
+            GAUSSIAN_EMBEDDING_INIT="$2"
             shift 2
             ;;
-        --num_freq_bands)
-            NUM_FREQ_BANDS="$2"
+        --use_fourier_embedding_init)
+            USE_FOURIER_EMBEDDING_INIT=true
+            shift
+            ;;
+        --fourier_frequencies)
+            FOURIER_FREQUENCIES="$2"
             shift 2
             ;;
-        --embedding_init)
-            EMBEDDING_INIT="$2"
-            shift 2
+        --use_amplitude_coefficients)
+            USE_AMPLITUDE_COEFFICIENTS=true
+            shift
             ;;
-        --temporal_init)
-            TEMPORAL_EMBEDDING_INIT="$2"
-            shift 2
+        --use_fourier_embedding_transform)
+            USE_FOURIER_EMBEDDING_TRANSFORM=true
+            shift
             ;;
         --gpu)
             GPU="$2"
@@ -321,22 +329,20 @@ generate_exp_name() {
     # Always add dimensions first
     local params="-gdim${GDIM}-tdim${TDIM}"
     
-    # Add Fourier features or initialization method
-    if [[ "$FOURIER_SCALE" != "0" ]]; then
-        # Using Fourier features - add fourier scale
-        params="${params}-fourier${FOURIER_SCALE}"
-    elif [[ "$EMBEDDING_INIT" != "zero" ]]; then
-        # Not using Fourier but using non-default initialization
-        params="${params}-${EMBEDDING_INIT}"
-        # Add num_freq_bands for structured fourier
-        if [[ "$EMBEDDING_INIT" == "structured_fourier" && -n "$NUM_FREQ_BANDS" ]]; then
-            params="${params}${NUM_FREQ_BANDS}"
+    # Add fourier initialization if enabled
+    if [[ "$USE_FOURIER_EMBEDDING_INIT" == "true" ]]; then
+        params="${params}-fourier${FOURIER_FREQUENCIES}"
+        if [[ "$USE_AMPLITUDE_COEFFICIENTS" == "true" ]]; then
+            params="${params}amp"
         fi
-    fi
-    
-    # Add temporal initialization if non-default
-    if [[ "$TEMPORAL_EMBEDDING_INIT" != "normal" ]]; then
-        params="${params}-temporal${TEMPORAL_EMBEDDING_INIT}"
+    elif [[ "$USE_FOURIER_EMBEDDING_TRANSFORM" == "true" ]]; then
+        params="${params}-fouriertransform${FOURIER_FREQUENCIES}"
+        if [[ "$USE_AMPLITUDE_COEFFICIENTS" == "true" ]]; then
+            params="${params}amp"
+        fi
+    elif [[ "$GAUSSIAN_EMBEDDING_INIT" != "zero" ]]; then
+        # Not using Fourier but using non-default initialization
+        params="${params}-${GAUSSIAN_EMBEDDING_INIT}"
     fi
     
     echo "${exp_name}${params}"
@@ -381,7 +387,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 EXP_NAME=$(generate_exp_name)
 
 # Generate unique hash based on all parameters to prevent identical experiments from overwriting
-PARAM_HASH=$(echo "${SCENE}_${GDIM}_${TDIM}_${FOURIER_SCALE}_${EMBEDDING_INIT}_${TEMPORAL_EMBEDDING_INIT}_${NUM_FREQ_BANDS}" | md5sum | cut -c1-8)
+PARAM_HASH=$(echo "${SCENE}_${GDIM}_${TDIM}_${USE_FOURIER_EMBEDDING_INIT}_${FOURIER_FREQUENCIES}_${USE_AMPLITUDE_COEFFICIENTS}_${USE_FOURIER_EMBEDDING_TRANSFORM}_${GAUSSIAN_EMBEDDING_INIT}" | md5sum | cut -c1-8)
 
 # Generate unique folder name with timestamp and hash
 UNIQUE_FOLDER_NAME="${SCENE}_${TIMESTAMP}_${PARAM_HASH}"
@@ -408,8 +414,13 @@ echo "   Timestamp: $TIMESTAMP"
 echo "   Parameter hash: $PARAM_HASH"
 echo "   Gaussian embedding dim: $GDIM"
 echo "   Temporal embedding dim: $TDIM"
-echo "   Fourier scale: $FOURIER_SCALE $([ "$FOURIER_SCALE" = "0" ] && echo "(disabled - original behavior)" || echo "(enabled)")"
-echo "   Embedding init: $EMBEDDING_INIT"
+echo "   Gaussian embedding init: $GAUSSIAN_EMBEDDING_INIT"
+echo "   Fourier embedding init: $USE_FOURIER_EMBEDDING_INIT"
+if [[ "$USE_FOURIER_EMBEDDING_INIT" == "true" ]]; then
+    echo "   Fourier frequencies: $FOURIER_FREQUENCIES"
+    echo "   Amplitude coefficients: $USE_AMPLITUDE_COEFFICIENTS"
+fi
+echo "   Fourier embedding transform: $USE_FOURIER_EMBEDDING_TRANSFORM"
 echo "   🎬 Video generation: $([ "$SKIP_VIDEO" = "true" ] && echo "Disabled" || echo "Enabled (video_rgb.mp4 will be created)")"
 echo "   💾 Estimated memory: ${ESTIMATED_MEMORY}GB"
 echo "   GPU: $GPU"
@@ -576,7 +587,7 @@ echo "TRAINING|\$(date)|\$SLURM_JOB_ID" >> "\$PROGRESS_FILE"
 done ) &
 MONITOR_PID=\$!
 
-CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
+CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --gaussian_embedding_init $GAUSSIAN_EMBEDDING_INIT --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ "$USE_FOURIER_EMBEDDING_INIT" == "true" ] && echo " --use_fourier_embedding_init")$([ "$FOURIER_FREQUENCIES" != "4" ] && echo " --fourier_frequencies $FOURIER_FREQUENCIES")$([ "$USE_AMPLITUDE_COEFFICIENTS" == "true" ] && echo " --use_amplitude_coefficients")$([ "$USE_FOURIER_EMBEDDING_TRANSFORM" == "true" ] && echo " --use_fourier_embedding_transform")
 
 # Stop monitoring
 kill \$MONITOR_PID 2>/dev/null || true
@@ -707,7 +718,7 @@ EOF
         echo ""
         echo "✅ Job submitted successfully!"
         echo "📊 Monitor with: ./tools/monitor_experiments.sh --status"
-        echo "📄 View logs with: ./tools/monitor_experiments.sh --logs"
+        echo "�� View logs with: ./tools/monitor_experiments.sh --logs"
         echo "👀 Watch live: ./tools/monitor_experiments.sh --watch"
     fi
 else
@@ -721,7 +732,7 @@ else
     
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "🔍 Dry run mode - would execute:"
-        echo "   CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname \"$EXP_NAME\" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION"
+        echo "   CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname \"$EXP_NAME\" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --gaussian_embedding_init $GAUSSIAN_EMBEDDING_INIT --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ "$USE_FOURIER_EMBEDDING_INIT" == "true" ] && echo " --use_fourier_embedding_init")$([ "$FOURIER_FREQUENCIES" != "4" ] && echo " --fourier_frequencies $FOURIER_FREQUENCIES")$([ "$USE_AMPLITUDE_COEFFICIENTS" == "true" ] && echo " --use_amplitude_coefficients")$([ "$USE_FOURIER_EMBEDDING_TRANSFORM" == "true" ] && echo " --use_fourier_embedding_transform")"
         if [[ "$SKIP_RENDER" != "true" ]]; then
             echo "   CUDA_VISIBLE_DEVICES=$GPU python render.py --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --skip_train --configs arguments/$DATASET/$SCENE.py$([ "$SKIP_VIDEO" = "true" ] && echo " --skip_video")"
         fi
@@ -738,7 +749,7 @@ else
         echo "========================================"
         
         # Training with real-time output
-        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --embedding_init $EMBEDDING_INIT --temporal_embedding_init $TEMPORAL_EMBEDDING_INIT --fourier_scale $FOURIER_SCALE --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ -n "$NUM_FREQ_BANDS" ] && echo " --num_freq_bands $NUM_FREQ_BANDS")
+        CUDA_VISIBLE_DEVICES=$GPU python train.py -s $GT_PATH/$SCENE --port 0 --model_path $SAVE_PATH/$DATASET/$UNIQUE_FOLDER_NAME --expname "$EXP_NAME" --configs arguments/$DATASET/$SCENE.py -r $RESOLUTION --gaussian_embedding_init $GAUSSIAN_EMBEDDING_INIT --gaussian_embedding_dim $GDIM --temporal_embedding_dim $TDIM$([ "$USE_FOURIER_EMBEDDING_INIT" == "true" ] && echo " --use_fourier_embedding_init")$([ "$FOURIER_FREQUENCIES" != "4" ] && echo " --fourier_frequencies $FOURIER_FREQUENCIES")$([ "$USE_AMPLITUDE_COEFFICIENTS" == "true" ] && echo " --use_amplitude_coefficients")$([ "$USE_FOURIER_EMBEDDING_TRANSFORM" == "true" ] && echo " --use_fourier_embedding_transform")
         
         if [ $? -eq 0 ]; then
             echo ""
